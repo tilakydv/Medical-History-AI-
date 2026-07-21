@@ -210,7 +210,7 @@ with st.sidebar:
 
 people = request("GET", "/patients") if health else []
 people = people or []
-tabs = st.tabs(["Patients", "Reports & Labs", "Brain MRI", "Grounded Summary"])
+tabs = st.tabs(["Patients", "Reports & Labs", "Brain MRI", "Grounded Summary", "🤖 AI Chatbot"])
 
 with tabs[0]:
     st.subheader("Register a patient")
@@ -357,17 +357,12 @@ with tabs[1]:
                             st.success("Extraction and stored laboratory values refreshed.")
                             st.rerun()
                     st.text_area("Extracted text", report.get("extracted_text", ""), height=260)
-                    col1, col2 = st.columns(2)
-                    col1.download_button(
+                    st.download_button(
                         "📄 Download Extracted Report (PDF)",
                         generate_pdf_bytes(f"Report - {selected_report['original_filename']}", report.get("extracted_text", "")),
                         file_name=f"{selected_report['original_filename']}-extracted.pdf",
                         mime="application/pdf",
-                    )
-                    col2.download_button(
-                        "📊 Download Report Pages (CSV)", csv_bytes(report.get("structured_data", {}).get("pages", [])),
-                        file_name=f"{selected_report['original_filename']}-pages.csv",
-                        mime="text/csv",
+                        use_container_width=True,
                     )
                     report_type = selected_report["report_type"].lower()
                     if report_type in {"lab", "laboratory", "pathology"}:
@@ -387,17 +382,12 @@ with tabs[1]:
                         rows = overview["key_findings"] + overview["within_reference_range"]
                         if rows:
                             st.dataframe(rows, use_container_width=True, hide_index=True)
-                        d1, d2 = st.columns(2)
-                        d1.download_button(
+                        st.download_button(
                             "📄 Download Lab Overview (PDF)",
                             generate_pdf_bytes(f"Lab Overview - {selected_report['original_filename']}", overview.get("summary_markdown", "")),
                             file_name=f"{selected_report['original_filename']}-labs-overview.pdf",
                             mime="application/pdf",
-                        )
-                        d2.download_button(
-                            "📊 Download Lab Values (CSV)", csv_bytes(rows),
-                            file_name=f"{selected_report['original_filename']}-labs.csv",
-                            mime="text/csv",
+                            use_container_width=True,
                         )
                     elif report_type == "radiology":
                         radiology = request(
@@ -437,23 +427,12 @@ with tabs[1]:
                                     for reference in radiology["image_references"]:
                                         st.write(reference)
                             st.caption(radiology["disclaimer"])
-                            col1, col2 = st.columns(2)
-                            col1.download_button(
-                                "Download structured radiology report",
-                                radiology["download_text"].encode("utf-8"),
-                                file_name=(
-                                    f"{selected_report['original_filename']}-structured.txt"
-                                ),
-                                mime="text/plain",
-                            )
-                            col2.download_button(
-                                "Download radiology findings (CSV)",
-                                csv_bytes([{"finding": item}
-                                           for item in radiology["findings"]]),
-                                file_name=(
-                                    f"{selected_report['original_filename']}-findings.csv"
-                                ),
-                                mime="text/csv",
+                            st.download_button(
+                                "📄 Download Radiology Report (PDF)",
+                                generate_pdf_bytes(f"Radiology Report - {selected_report['original_filename']}", radiology.get("download_text", "")),
+                                file_name=f"{selected_report['original_filename']}-radiology.pdf",
+                                mime="application/pdf",
+                                use_container_width=True,
                             )
                     else:
                         st.subheader(f"{report_type.title()} report")
@@ -469,15 +448,11 @@ with tabs[1]:
                     {"test": test, **entry}
                     for test, entries in trends["series"].items() for entry in entries
                 ]
-                c1, c2 = st.columns(2)
-                c1.download_button(
-                    "📊 Download Trends (CSV)", csv_bytes(flat_rows),
-                    file_name=f"{patient['name']}-lab-trends.csv", mime="text/csv",
-                )
-                c2.download_button(
-                    "📄 Download Trends (PDF)",
+                st.download_button(
+                    "📄 Download Trends Report (PDF)",
                     generate_pdf_bytes(f"Lab Trends - {patient['name']}", format_patient_record_text(detail)),
                     file_name=f"{patient['name']}-lab-trends.pdf", mime="application/pdf",
+                    use_container_width=True,
                 )
 
 with tabs[2]:
@@ -525,6 +500,7 @@ with tabs[2]:
                 "📄 Download MRI Report (PDF)",
                 generate_pdf_bytes(f"Brain MRI Report - {patient['name']}", format_mri_text(scan, patient['name'])),
                 file_name=f"{patient['name']}-mri-{scan['id'][:8]}.pdf", mime="application/pdf",
+                use_container_width=True,
             )
             analysis_supported = (scan.get("metadata_json") or {}).get("format") == "nifti"
             if scan["status"] != "analyzed" and st.button(
@@ -564,15 +540,11 @@ with tabs[3]:
             st.markdown(summary["narrative_summary_markdown"])
             with st.expander("Structured summary data"):
                 st.json(summary)
-            col1, col2 = st.columns(2)
-            col1.download_button(
+            st.download_button(
                 "📄 Download Grounded Summary (PDF)",
                 generate_pdf_bytes(f"Grounded Summary - {patient['name']}", summary["narrative_summary_markdown"]),
                 file_name=f"{patient['name']}-grounded-summary.pdf", mime="application/pdf",
-            )
-            col2.download_button(
-                "📝 Download Summary (Markdown)", summary["narrative_summary_markdown"].encode("utf-8"),
-                file_name=f"{patient['name']}-grounded-summary.md", mime="text/markdown",
+                use_container_width=True,
             )
         record = request("GET", f"/clinical-intel/{patient['id']}/record")
         if record:
@@ -593,3 +565,69 @@ with tabs[3]:
                     generate_pdf_bytes(f"Full Patient Record - {patient['name']}", format_patient_record_text(detail)),
                     file_name=f"{patient['name']}-full-record.pdf", mime="application/pdf",
                 )
+
+with tabs[4]:
+    st.subheader("🤖 AI Clinical Chatbot")
+    st.caption("Ask any question about the patient's medical history, lab results, diagnoses, medications, or MRI scans.")
+    patient = patient_selector(people, "chat_patient")
+    if patient:
+        patient_id = patient["id"]
+        chat_key = f"chat_messages_{patient_id}"
+        if chat_key not in st.session_state:
+            st.session_state[chat_key] = [
+                {"role": "assistant", "content": f"Hello! I am your AI Clinical Assistant. Ask me anything about **{patient['name']}**'s uploaded medical records or lab results."}
+            ]
+
+        st.markdown("**Quick Questions:**")
+        qc1, qc2, qc3, qc4 = st.columns(4)
+        quick_query = None
+        if qc1.button("📄 Summarize Patient", key="q1", use_container_width=True):
+            quick_query = "Summarize this patient's medical records and key findings."
+        if qc2.button("💊 Medications & Allergies", key="q2", use_container_width=True):
+            quick_query = "What medications and allergies are documented for this patient?"
+        if qc3.button("📊 Lab Results", key="q3", use_container_width=True):
+            quick_query = "What are the lab results and any abnormal lab values?"
+        if qc4.button("🧠 MRI Findings", key="q4", use_container_width=True):
+            quick_query = "What are the brain MRI findings and tumor status?"
+
+        for msg in st.session_state[chat_key]:
+            with st.chat_message(msg["role"]):
+                st.write(msg["content"])
+                if msg.get("citations"):
+                    with st.expander("📚 Source Citations"):
+                        for cite in msg["citations"]:
+                            st.caption(f"• **{cite.get('document_id')}**: {cite.get('excerpt')}")
+
+        user_input = st.chat_input(f"Ask a question about {patient['name']}...")
+        active_query = user_input or quick_query
+
+        if active_query:
+            st.session_state[chat_key].append({"role": "user", "content": active_query})
+            with st.chat_message("user"):
+                st.write(active_query)
+
+            with st.chat_message("assistant"):
+                with st.spinner("Analyzing patient records..."):
+                    history_payload = [
+                        {"role": m["role"], "content": m["content"]}
+                        for m in st.session_state[chat_key][:-1]
+                    ]
+                    response = request(
+                        "POST",
+                        f"/clinical-intel/{patient_id}/chat/query",
+                        json={"query": active_query, "chat_history": history_payload},
+                    )
+                    if response:
+                        answer = response.get("answer", "No response generated.")
+                        citations = response.get("citations", [])
+                        st.write(answer)
+                        if citations:
+                            with st.expander("📚 Source Citations"):
+                                for cite in citations:
+                                    st.caption(f"• **{cite.get('document_id')}**: {cite.get('excerpt')}")
+                        st.session_state[chat_key].append({
+                            "role": "assistant",
+                            "content": answer,
+                            "citations": citations,
+                        })
+                        st.rerun()
