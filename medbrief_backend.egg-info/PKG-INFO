@@ -1,0 +1,29 @@
+Metadata-Version: 2.4
+Name: medbrief-backend
+Version: 0.1.0
+Summary: Backend, OCR, laboratory, and MRI analysis services for MedBrief AI
+Requires-Python: >=3.11
+Requires-Dist: fastapi<1,>=0.115
+Requires-Dist: uvicorn[standard]<1,>=0.30
+Requires-Dist: sqlalchemy<3,>=2.0
+Requires-Dist: pydantic-settings<3,>=2.5
+Requires-Dist: python-multipart<1,>=0.0.12
+Requires-Dist: PyMuPDF<2,>=1.24
+Requires-Dist: Pillow<12,>=10
+Requires-Dist: numpy<3,>=1.26
+Requires-Dist: nibabel<6,>=5.2
+Requires-Dist: pydicom<4,>=3
+Requires-Dist: httpx<1,>=0.27
+Requires-Dist: streamlit<2,>=1.40
+Provides-Extra: postgres
+Requires-Dist: psycopg[binary]<4,>=3.2; extra == "postgres"
+Provides-Extra: ocr
+Requires-Dist: paddleocr<3,>=2.9; extra == "ocr"
+Requires-Dist: paddlepaddle<4,>=2.6; extra == "ocr"
+Requires-Dist: opencv-python-headless<5,>=4.10; extra == "ocr"
+Provides-Extra: mri
+Requires-Dist: monai<2,>=1.4; extra == "mri"
+Requires-Dist: torch<3,>=2.4; extra == "mri"
+Provides-Extra: dev
+Requires-Dist: pytest<9,>=8; extra == "dev"
+Requires-Dist: ruff<1,>=0.7; extra == "dev"
