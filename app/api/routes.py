@@ -16,6 +16,7 @@ from app.services.integration_service import LLMIntegrationService
 from app.services.lab_service import LaboratoryService
 from app.services.mri_service import MRIService
 from app.services.ocr_service import OCRService
+from app.services.radiology_service import RadiologyService
 from app.services.upload_service import UploadService
 
 router = APIRouter()
@@ -117,6 +118,27 @@ def get_report(report_id: str, db: DB) -> Report:
     return report
 
 
+@router.get("/patients/{patient_id}/reports", tags=["reports"])
+def patient_reports(patient_id: str, db: DB) -> list[dict[str, Any]]:
+    """List persisted reports with their source filename for patient-facing selection."""
+    if not db.get(Patient, patient_id):
+        raise NotFoundError("Patient not found")
+    rows = db.execute(
+        select(Report, Upload)
+        .join(Upload, Upload.id == Report.upload_id)
+        .where(Report.patient_id == patient_id)
+        .order_by(Report.created_at.desc())
+    ).all()
+    return [
+        {
+            **ReportRead.model_validate(report).model_dump(mode="json"),
+            "original_filename": upload.original_filename,
+            "upload_status": upload.status,
+        }
+        for report, upload in rows
+    ]
+
+
 @router.get("/reports/{report_id}/lab-overview", tags=["laboratory"])
 def report_lab_overview(report_id: str, db: DB) -> dict[str, Any]:
     report = db.get(Report, report_id)
@@ -125,6 +147,19 @@ def report_lab_overview(report_id: str, db: DB) -> dict[str, Any]:
     if not report.extracted_text:
         raise NotFoundError("Extract the report before requesting its overview")
     return LaboratoryService().overview(report.extracted_text)
+
+
+@router.get("/reports/{report_id}/radiology-overview", tags=["radiology"])
+def report_radiology_overview(report_id: str, db: DB) -> dict[str, Any]:
+    report = db.get(Report, report_id)
+    if not report:
+        raise NotFoundError("Report not found")
+    if not report.extracted_text:
+        raise NotFoundError("Extract the report before requesting its overview")
+    service = RadiologyService()
+    overview = service.overview(report.extracted_text)
+    overview["download_text"] = service.as_text(overview)
+    return overview
 
 
 @router.get("/mri/{mri_id}", response_model=MRIRead, tags=["mri"])

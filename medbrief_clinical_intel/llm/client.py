@@ -107,8 +107,11 @@ class QwenLLMClient:
                 return generated_text.split("<|im_start|>assistant\n")[-1].replace("<|im_end|>", "").strip()
             return generated_text[len(prompt_text):].strip()
 
-        # Mock fallback response generator (for development & dry-runs)
-        return self._generate_mock_response(prompt, sys_prompt)
+        # Never return fabricated clinical examples when a real model is unavailable.
+        return (
+            "AI model is not configured. No generated clinical interpretation is available. "
+            "Use the grounded extractive summary, or configure the approved clinical model."
+        )
 
     def _generate_mock_response(self, prompt: str, system_prompt: str) -> str:
         """Deterministic mock response generator for testing without full 14B weights."""
@@ -251,5 +254,4 @@ class QwenLLMClient:
             return "Language Detected: Mixed English-Hindi\nTranslated Text:\nPatient has diabetes for 5 years. Takes sugar tablet Dabai (Metformin 500mg). Complaining of head pain (sir dard) for 2 weeks. Brain MRI shows tumor."
         else:
             return "Based strictly on uploaded patient records, the patient has documented history of diabetes, hypertension, and recent MRI findings indicating a brain lesion."
-
 

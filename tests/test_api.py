@@ -74,6 +74,28 @@ def test_missing_mri_model_returns_service_unavailable(client):
     assert response.json()["error"] == "model_unavailable"
 
 
+def test_mri_reference_image_can_be_stored_but_is_not_analysis_ready(client):
+    import io
+
+    from PIL import Image
+
+    person = patient(client)
+    content = io.BytesIO()
+    Image.new("L", (16, 12), color=80).save(content, format="PNG")
+
+    uploaded = client.post(
+        "/upload-mri",
+        data={"patient_id": person["id"]},
+        files={"file": ("slice.png", content.getvalue(), "image/png")},
+    )
+
+    assert uploaded.status_code == 200
+    scan = client.get(f"/mri/{uploaded.json()['resource_id']}")
+    assert scan.status_code == 200
+    assert scan.json()["metadata_json"]["format"] == "reference_image"
+    assert scan.json()["metadata_json"]["analysis_supported"] is False
+
+
 def test_clinical_intelligence_uses_persisted_ocr_record(client):
     person = patient(client)
     uploaded = client.post(
@@ -90,7 +112,15 @@ def test_clinical_intelligence_uses_persisted_ocr_record(client):
     summary = client.post(f"/clinical-intel/{person['id']}/summary")
     assert summary.status_code == 200
     assert summary.json()["patient_id"] == person["id"]
-    assert summary.json()["narrative_summary_markdown"]
+    markdown = summary.json()["narrative_summary_markdown"]
+    assert "Hemoglobin 11.2" in markdown
+    assert "Grounded Patient Summary" in markdown
+    assert "Brain Tumor" not in markdown
+
+    reports = client.get(f"/patients/{person['id']}/reports")
+    assert reports.status_code == 200
+    assert reports.json()[0]["original_filename"] == "history.pdf"
+    assert reports.json()[0]["status"] == "extracted"
 
 
 def test_clinical_chat_uses_patient_context(client):

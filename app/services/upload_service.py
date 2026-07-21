@@ -1,5 +1,4 @@
 import uuid
-from pathlib import Path
 
 from fastapi import UploadFile
 from sqlalchemy import select
@@ -9,7 +8,8 @@ from sqlalchemy.orm import Session
 from app.core.config import Settings
 from app.core.exceptions import NotFoundError
 from app.models import MRIScan, Patient, Report, Upload
-from app.utils.files import MRI_EXTENSIONS, REPORT_EXTENSIONS, StoredFile, safe_filename, store_upload
+from app.utils.files import (MRI_EXTENSIONS, REPORT_EXTENSIONS, StoredFile, extension_for,
+                             safe_filename, store_upload)
 
 
 class UploadService:
@@ -46,7 +46,7 @@ class UploadService:
         return upload, scan, False
 
     async def _store(self, patient_id: str, file: UploadFile, kind: str, allowed: set[str]) -> StoredFile:
-        suffix = Path(safe_filename(file.filename)).suffix
+        suffix = extension_for(safe_filename(file.filename))
         destination = self.settings.upload_dir / patient_id / kind / f"{uuid.uuid4()}{suffix}"
         return await store_upload(file, destination, allowed, self.settings.max_upload_bytes)
 
@@ -75,4 +75,3 @@ class UploadService:
         except IntegrityError:
             self.db.rollback()
             raise
-
