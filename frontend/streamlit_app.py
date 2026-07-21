@@ -1,6 +1,5 @@
 import csv
 import io
-import json
 import os
 from datetime import date
 from typing import Any
@@ -33,10 +32,6 @@ def request(method: str, path: str, **kwargs: Any) -> Any:
     except httpx.RequestError as exc:
         st.error(f"Cannot reach the backend at {API_URL}: {exc}")
         return None
-
-
-def json_bytes(value: Any) -> bytes:
-    return json.dumps(value, indent=2, ensure_ascii=False, default=str).encode("utf-8")
 
 
 def csv_bytes(rows: list[dict[str, Any]]) -> bytes:
@@ -188,9 +183,17 @@ def report_selector(patient_id: str, key: str) -> tuple[dict[str, Any] | None, l
     if not reports:
         st.info("No reports stored for this patient yet.")
         return None, reports
+    report_types = sorted({item["report_type"] for item in reports})
+    selected_type = st.selectbox(
+        "Filter reports by type", ["all", *report_types], key=f"{key}_type",
+    )
+    visible_reports = (
+        reports if selected_type == "all"
+        else [item for item in reports if item["report_type"] == selected_type]
+    )
     labels = {
         f"{item['original_filename']} | {item['report_type']} | {item['status']} | {item['id'][:8]}": item
-        for item in reports
+        for item in visible_reports
     }
     label = st.selectbox("Select stored report", list(labels), key=key)
     return labels[label], reports
@@ -347,6 +350,12 @@ with tabs[1]:
                 report = request("GET", f"/reports/{selected_report['id']}")
                 if report:
                     st.subheader("Extracted report information")
+                    if st.button("Re-extract and refresh stored lab values"):
+                        refreshed = request("POST", "/extract-report",
+                                            params={"report_id": selected_report["id"]})
+                        if refreshed:
+                            st.success("Extraction and stored laboratory values refreshed.")
+                            st.rerun()
                     st.text_area("Extracted text", report.get("extracted_text", ""), height=260)
                     col1, col2 = st.columns(2)
                     col1.download_button(
@@ -360,8 +369,14 @@ with tabs[1]:
                         file_name=f"{selected_report['original_filename']}-pages.csv",
                         mime="text/csv",
                     )
-                    overview = request("GET", f"/reports/{selected_report['id']}/lab-overview")
-                    if overview:
+                    report_type = selected_report["report_type"].lower()
+                    if report_type in {"lab", "laboratory", "pathology"}:
+                        overview = request(
+                            "GET", f"/reports/{selected_report['id']}/lab-overview"
+                        )
+                    else:
+                        overview = None
+                    if overview and report_type in {"lab", "laboratory", "pathology"}:
                         st.subheader("Laboratory overview")
                         st.markdown(overview["summary_markdown"])
                         counts = overview["counts"]
@@ -384,11 +399,72 @@ with tabs[1]:
                             file_name=f"{selected_report['original_filename']}-labs.csv",
                             mime="text/csv",
                         )
+                    elif report_type == "radiology":
+                        radiology = request(
+                            "GET", f"/reports/{selected_report['id']}/radiology-overview"
+                        )
+                        st.subheader("Radiology report")
+                        st.info(
+                            "This is the written radiology interpretation. Upload the actual "
+                            "DICOM or NIfTI scan in the Brain MRI tab for imaging analysis."
+                        )
+                        if radiology:
+                            if radiology["metadata"]:
+                                st.markdown("#### Report and patient details")
+                                st.dataframe(
+                                    [{"Detail": key, "Information": value}
+                                     for key, value in radiology["metadata"].items()],
+                                    use_container_width=True, hide_index=True,
+                                )
+                            if radiology["clinical_history"]:
+                                st.markdown("#### Relevant clinical history")
+                                st.write(radiology["clinical_history"])
+                            st.markdown("#### Main imaging findings")
+                            if radiology["findings"]:
+                                for number, finding in enumerate(radiology["findings"], start=1):
+                                    st.markdown(f"{number}. {finding}")
+                            else:
+                                st.caption("No dedicated findings section was identified.")
+                            if radiology["conclusion"]:
+                                st.markdown("#### Conclusion")
+                                st.write(radiology["conclusion"])
+                            if radiology["recommendations"]:
+                                st.markdown("#### Documented recommendations")
+                                for recommendation in radiology["recommendations"]:
+                                    st.markdown(f"- {recommendation}")
+                            if radiology["image_references"]:
+                                with st.expander("Image references"):
+                                    for reference in radiology["image_references"]:
+                                        st.write(reference)
+                            st.caption(radiology["disclaimer"])
+                            col1, col2 = st.columns(2)
+                            col1.download_button(
+                                "Download structured radiology report",
+                                radiology["download_text"].encode("utf-8"),
+                                file_name=(
+                                    f"{selected_report['original_filename']}-structured.txt"
+                                ),
+                                mime="text/plain",
+                            )
+                            col2.download_button(
+                                "Download radiology findings (CSV)",
+                                csv_bytes([{"finding": item}
+                                           for item in radiology["findings"]]),
+                                file_name=(
+                                    f"{selected_report['original_filename']}-findings.csv"
+                                ),
+                                mime="text/csv",
+                            )
+                    else:
+                        st.subheader(f"{report_type.title()} report")
+                        st.caption(
+                            "The extracted report text is displayed above and is available "
+                            "for inclusion in the grounded patient summary."
+                        )
 
         trends = request("GET", f"/patients/{patient['id']}/lab-trends")
         if trends and trends.get("series"):
             with st.expander("Patient laboratory history and trends"):
-                st.json(trends["series"])
                 flat_rows = [
                     {"test": test, **entry}
                     for test, entries in trends["series"].items() for entry in entries
@@ -412,8 +488,11 @@ with tabs[2]:
         detail = request("GET", f"/patient/{patient['id']}") or {}
         scans = detail.get("mri_scans", [])
         mri_file = st.file_uploader(
-            "Upload DICOM, DICOM ZIP, or NIfTI", type=["dcm", "zip", "nii", "gz"],
-            key="mri_upload",
+            "Upload MRI file", key="mri_upload",
+        )
+        st.caption(
+            "Accepted: NIfTI (.nii/.nii.gz), DICOM (.dcm/.dicom), DICOM ZIP, and "
+            "reference images (PNG, JPEG, TIFF). Only 3D NIfTI is currently analysis-ready."
         )
         if st.button("Upload MRI", disabled=mri_file is None, type="primary"):
             uploaded = request(
@@ -427,13 +506,31 @@ with tabs[2]:
         if scans:
             choices = {f"{s['modality']} | {s['status']} | {s['id'][:8]}": s for s in scans}
             scan = choices[st.selectbox("Select stored MRI", list(choices), key="stored_mri")]
-            st.json(scan)
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Modality", scan["modality"])
+            m2.metric("Status", scan["status"].title())
+            m3.metric("Study date", scan.get("study_date") or "Not recorded")
+            result = scan.get("result")
+            if result:
+                st.subheader("MRI analysis result")
+                st.dataframe([{
+                    "Model": result.get("model_name"),
+                    "Model version": result.get("model_version"),
+                    "Tumor volume (mm³)": result.get("tumor_volume_mm3"),
+                    "Confidence": result.get("confidence_score"),
+                    "Localization": str(result.get("localization") or "Not recorded"),
+                    "Findings": str(result.get("findings") or "Not recorded"),
+                }], use_container_width=True, hide_index=True)
             st.download_button(
                 "📄 Download MRI Report (PDF)",
                 generate_pdf_bytes(f"Brain MRI Report - {patient['name']}", format_mri_text(scan, patient['name'])),
                 file_name=f"{patient['name']}-mri-{scan['id'][:8]}.pdf", mime="application/pdf",
             )
-            if scan["status"] != "analyzed" and st.button("Run configured MRI analysis"):
+            analysis_supported = (scan.get("metadata_json") or {}).get("format") == "nifti"
+            if scan["status"] != "analyzed" and st.button(
+                "Run configured MRI analysis", disabled=not analysis_supported,
+                help=None if analysis_supported else "3D analysis currently requires NIfTI input.",
+            ):
                 analyzed = request("POST", "/analyze-mri", params={"mri_id": scan["id"]})
                 if analyzed:
                     st.success("MRI analysis completed.")
@@ -479,8 +576,18 @@ with tabs[3]:
             )
         record = request("GET", f"/clinical-intel/{patient['id']}/record")
         if record:
-            with st.expander("Complete normalized patient information"):
-                st.json(record)
+            documents = record.get("documents", [])
+            with st.expander("Extracted source documents"):
+                st.dataframe([{
+                    "Type": document.get("document_type"),
+                    "Date": document.get("date") or "Not recorded",
+                    "Document ID": document.get("document_id"),
+                } for document in documents], use_container_width=True, hide_index=True)
+                combined_text = "\n\n".join(
+                    f"{document.get('document_type', 'Report')} | {document.get('date') or 'Date not recorded'}\n"
+                    f"{document.get('extracted_text', '')}"
+                    for document in documents
+                )
                 st.download_button(
                     "📄 Download Full Patient Record (PDF)",
                     generate_pdf_bytes(f"Full Patient Record - {patient['name']}", format_patient_record_text(detail)),
