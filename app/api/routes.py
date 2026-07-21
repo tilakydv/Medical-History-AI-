@@ -16,6 +16,7 @@ from app.services.integration_service import LLMIntegrationService
 from app.services.lab_service import LaboratoryService
 from app.services.mri_service import MRIService
 from app.services.ocr_service import OCRService
+from app.services.radiology_service import RadiologyService
 from app.services.upload_service import UploadService
 
 router = APIRouter()
@@ -146,6 +147,19 @@ def report_lab_overview(report_id: str, db: DB) -> dict[str, Any]:
     if not report.extracted_text:
         raise NotFoundError("Extract the report before requesting its overview")
     return LaboratoryService().overview(report.extracted_text)
+
+
+@router.get("/reports/{report_id}/radiology-overview", tags=["radiology"])
+def report_radiology_overview(report_id: str, db: DB) -> dict[str, Any]:
+    report = db.get(Report, report_id)
+    if not report:
+        raise NotFoundError("Report not found")
+    if not report.extracted_text:
+        raise NotFoundError("Extract the report before requesting its overview")
+    service = RadiologyService()
+    overview = service.overview(report.extracted_text)
+    overview["download_text"] = service.as_text(overview)
+    return overview
 
 
 @router.get("/mri/{mri_id}", response_model=MRIRead, tags=["mri"])

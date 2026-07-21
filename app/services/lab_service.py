@@ -32,6 +32,15 @@ class LaboratoryService:
                        r"(?P<low>-?\d+(?:[.,]\d+)?)\s*[-–]\s*"
                        r"(?P<high>-?\d+(?:[.,]\d+)?))\s*$")
     VALUE = re.compile(r"^[<>]?\s*-?\d+(?:[.,]\d+)?$")
+    FLEX_RANGE = re.compile(
+        r"^\s*(?:(?P<op>[<>])\s*(?P<limit>\d+(?:[.,]\d+)?)|"
+        r"(?P<low>-?\d+(?:[.,]\d+)?)\s*-\s*(?P<high>-?\d+(?:[.,]\d+)?))"
+        r"(?:\s*(?P<unit>[A-Za-z%/^0-9.-]+))?\s*$"
+    )
+    VALUE_UNIT = re.compile(
+        r"^\s*(?P<value>[<>]?\s*-?\d+(?:[.,]\d+)?)"
+        r"(?:\s*(?P<unit>[A-Za-z%/^0-9.-]+))?\s*$"
+    )
     SKIP_NAME = re.compile(
         r"method|serum|plasma|blood|urine|calculated|colorim|assay|cytometry|"
         r"electrode|enzym|visual|manual|test name|result|panel|examination|profile|"
@@ -42,6 +51,7 @@ class LaboratoryService:
                         "desirable", "borderline high", "borderline low"}
 
     def parse(self, text: str) -> list[ParsedLab]:
+        text = self._normalize_pdf_text(text)
         values: list[ParsedLab] = []
         for raw in text.splitlines():
             match = self.LINE.match(raw)
@@ -67,9 +77,23 @@ class LaboratoryService:
         lines = [line.strip() for line in text.splitlines() if line.strip()]
         output: list[ParsedLab] = []
         for index, line in enumerate(lines):
-            reference = self.RANGE.match(line)
-            if not reference or index < 3:
+            reference = self.FLEX_RANGE.match(line) or self.RANGE.match(line)
+            if not reference or index < 2:
                 continue
+
+            # PDF comparison tables commonly extract one row as five separate lines:
+            # test name / previous result / current result / reference range / status.
+            current = self.VALUE_UNIT.match(lines[index - 1])
+            previous = self.VALUE_UNIT.match(lines[index - 2]) if index >= 2 else None
+            if current and previous and index >= 3:
+                name = lines[index - 3]
+                if self._valid_name(name):
+                    value = self._number(current.group("value").replace(" ", "").lstrip("<>"))
+                    low, high = self._reference_bounds(reference)
+                    unit = current.group("unit") or reference.groupdict().get("unit")
+                    output.append(ParsedLab(name[:150], value, None, unit, low, high,
+                                            self._flag(value, low, high)))
+                    continue
             value_index = index - 2
             if not self.VALUE.match(lines[value_index]):
                 # Units occasionally wrap; tolerate one extra line between value and range.
@@ -91,11 +115,20 @@ class LaboratoryService:
                                     self._flag(value, low, high)))
         return output
 
+    def _valid_name(self, candidate: str) -> bool:
+        return bool(
+            not self.SKIP_NAME.search(candidate)
+            and not self.VALUE.match(candidate)
+            and not self.VALUE_UNIT.match(candidate)
+            and not self.RANGE.match(candidate)
+            and not self.FLEX_RANGE.match(candidate)
+            and len(candidate) > 1
+            and candidate.lower() not in self.REFERENCE_LABELS
+        )
+
     def _find_vertical_name(self, lines: list[str], value_index: int) -> str | None:
         for candidate in reversed(lines[max(0, value_index - 5):value_index]):
-            if (not self.SKIP_NAME.search(candidate) and not self.VALUE.match(candidate)
-                    and not self.RANGE.match(candidate) and len(candidate) > 1
-                    and candidate.lower() not in self.REFERENCE_LABELS):
+            if self._valid_name(candidate):
                 return candidate[:150]
         return None
 
@@ -148,6 +181,7 @@ class LaboratoryService:
         reference = None
         if item.reference_low is not None and item.reference_high is not None:
             reference = f"{item.reference_low:g}–{item.reference_high:g}"
+            reference = f"{item.reference_low:g}-{item.reference_high:g}"
         elif item.reference_low is not None:
             reference = f">{item.reference_low:g}"
         elif item.reference_high is not None:
@@ -159,17 +193,29 @@ class LaboratoryService:
                 observed_at: datetime | None = None) -> LaboratoryReport:
         old = db.scalar(select(LaboratoryReport).where(LaboratoryReport.report_id == report_id))
         if old:
-            return old
-        lab_report = LaboratoryReport(report_id=report_id, patient_id=patient_id,
-                                      collected_at=observed_at)
-        db.add(lab_report)
-        db.flush()
+            lab_report = old
+            for value in db.scalars(
+                select(LaboratoryValue).where(LaboratoryValue.lab_report_id == old.id)
+            ).all():
+                db.delete(value)
+            db.flush()
+        else:
+            lab_report = LaboratoryReport(report_id=report_id, patient_id=patient_id,
+                                          collected_at=observed_at)
+            db.add(lab_report)
+            db.flush()
         for item in self.parse(text):
             db.add(LaboratoryValue(lab_report_id=lab_report.id, patient_id=patient_id,
                                    observed_at=observed_at, **item.__dict__))
         db.commit()
         db.refresh(lab_report)
         return lab_report
+
+    @staticmethod
+    def _normalize_pdf_text(text: str) -> str:
+        """Normalize common dash characters emitted by PDF text extraction."""
+        return (text.replace("\ufffd", "-").replace("\u2013", "-")
+                .replace("\u2014", "-"))
 
     def trends(self, db: Session, patient_id: str) -> dict[str, list[dict[str, Any]]]:
         rows = db.scalars(select(LaboratoryValue).where(LaboratoryValue.patient_id == patient_id)

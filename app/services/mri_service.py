@@ -29,7 +29,7 @@ class MRIService:
                 raise InvalidFileError("NIfTI MRI must contain a 3D volume")
             return {"format": "nifti", "shape": list(image.shape),
                     "voxel_spacing_mm": [float(v) for v in image.header.get_zooms()[:3]]}
-        if path.suffix.lower() == ".dcm":
+        if path.suffix.lower() in {".dcm", ".dicom"}:
             try:
                 ds = pydicom.dcmread(str(path), stop_before_pixels=True)
             except Exception as exc:
@@ -39,7 +39,18 @@ class MRIService:
                     "series_instance_uid": str(getattr(ds, "SeriesInstanceUID", ""))}
         if path.suffix.lower() == ".zip":
             return {"format": "dicom_archive", "validated": "during secure extraction"}
-        raise InvalidFileError("MRI input must be DICOM, a DICOM ZIP, or NIfTI")
+        if path.suffix.lower() in {".png", ".jpg", ".jpeg", ".tif", ".tiff"}:
+            try:
+                with Image.open(path) as image:
+                    image.verify()
+                with Image.open(path) as image:
+                    return {"format": "reference_image", "dimensions": list(image.size),
+                            "image_mode": image.mode, "analysis_supported": False}
+            except Exception as exc:
+                raise InvalidFileError("Invalid MRI reference image") from exc
+        raise InvalidFileError(
+            "Unsupported MRI content. Use NIfTI, DICOM, a DICOM ZIP, PNG, JPEG, or TIFF."
+        )
 
     def analyze(self, input_path: Path, output_dir: Path) -> dict[str, Any]:
         if not self.settings.nnunet_command or not self.settings.mri_model_name:
@@ -64,7 +75,8 @@ class MRIService:
         if path.name.lower().endswith((".nii", ".nii.gz")):
             return path
         raise ProcessingError(
-            "DICOM conversion requires a deployment-specific series converter; upload NIfTI for inference"
+            "3D analysis requires NIfTI input. DICOM conversion requires a configured "
+            "series converter; 2D reference images cannot be segmented by this pipeline."
         )
 
     def _preprocess(self, path: Path, output_dir: Path) -> Path:

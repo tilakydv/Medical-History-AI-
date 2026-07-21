@@ -8,7 +8,10 @@ from fastapi import UploadFile
 from app.core.exceptions import InvalidFileError
 
 REPORT_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg", ".tif", ".tiff"}
-MRI_EXTENSIONS = {".nii", ".gz", ".dcm", ".zip"}
+MRI_EXTENSIONS = {
+    ".nii", ".gz", ".dcm", ".dicom", ".zip",
+    ".png", ".jpg", ".jpeg", ".tif", ".tiff",
+}
 MAGIC = {
     ".pdf": (b"%PDF",),
     ".png": (b"\x89PNG\r\n\x1a\n",),
@@ -65,7 +68,7 @@ async def store_upload(upload: UploadFile, destination: Path, allowed: set[str],
         signatures = MAGIC.get(validation_ext)
         if signatures and not any(header.startswith(signature) for signature in signatures):
             raise InvalidFileError("File content does not match its extension")
-        if ext == ".dcm" and len(header) >= 132 and header[128:132] != b"DICM":
+        if ext in {".dcm", ".dicom"} and len(header) >= 132 and header[128:132] != b"DICM":
             # Some valid DICOM datasets omit the preamble; pydicom performs final validation.
             pass
         return StoredFile(destination, size, digest.hexdigest(), ext)
@@ -74,4 +77,3 @@ async def store_upload(upload: UploadFile, destination: Path, allowed: set[str],
         raise
     finally:
         await upload.close()
-
