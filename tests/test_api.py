@@ -152,6 +152,35 @@ def test_delete_patient(client):
     assert get_resp.status_code == 404
 
 
+def test_delete_one_report_keeps_patient_and_other_reports(client):
+    person = patient(client)
+    first = client.post(
+        "/upload-report",
+        data={"patient_id": person["id"], "report_type": "laboratory"},
+        files={"file": ("first-lab.pdf", pdf_bytes(), "application/pdf")},
+    ).json()
+    client.post("/extract-report", params={"report_id": first["resource_id"]})
+
+    document = fitz.open()
+    page = document.new_page()
+    page.insert_text((72, 72), "A separate clinical report for Test Patient")
+    second_content = document.tobytes()
+    document.close()
+    second = client.post(
+        "/upload-report",
+        data={"patient_id": person["id"], "report_type": "clinical"},
+        files={"file": ("second.pdf", second_content, "application/pdf")},
+    ).json()
+
+    deleted = client.delete(f"/reports/{first['resource_id']}")
+
+    assert deleted.status_code == 200
+    assert client.get(f"/reports/{first['resource_id']}").status_code == 404
+    assert client.get(f"/patient/{person['id']}").status_code == 200
+    reports = client.get(f"/patients/{person['id']}/reports").json()
+    assert [report["id"] for report in reports] == [second["resource_id"]]
+
+
 def test_update_patient(client):
     person = patient(client)
     person_id = person["id"]
