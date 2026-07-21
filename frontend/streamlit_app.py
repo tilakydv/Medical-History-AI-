@@ -195,8 +195,47 @@ def report_selector(patient_id: str, key: str) -> tuple[dict[str, Any] | None, l
         f"{item['original_filename']} | {item['report_type']} | {item['status']} | {item['id'][:8]}": item
         for item in visible_reports
     }
-    label = st.selectbox("Select stored report", list(labels), key=key)
+    label = st.selectbox(
+        "Select stored report",
+        list(labels),
+        index=None,
+        placeholder="Choose a stored report",
+        key=key,
+    )
+    if label is None:
+        st.info("Select a stored report to load its extracted information.")
+        return None, reports
     return labels[label], reports
+
+
+def clear_generated_results() -> None:
+    """Clear results that may become stale after navigation or a new upload."""
+    for key in list(st.session_state):
+        if key.startswith("summary_"):
+            del st.session_state[key]
+
+
+def clear_report_selection() -> None:
+    clear_generated_results()
+    for key in list(st.session_state):
+        if key.startswith("extracted_text_"):
+            del st.session_state[key]
+    st.session_state.pop("stored_report", None)
+    st.session_state.pop("stored_report_type", None)
+    st.session_state.pop("selected_report_id", None)
+
+
+def clear_mri_selection() -> None:
+    clear_generated_results()
+    st.session_state.pop("stored_mri", None)
+
+
+def refresh_current_page() -> None:
+    """Reset transient widgets while preserving database-backed patient information."""
+    clear_report_selection()
+    clear_mri_selection()
+    st.session_state.pop("report_upload", None)
+    st.session_state.pop("mri_upload", None)
 
 
 health = request("GET", "/health")
@@ -207,12 +246,21 @@ with st.sidebar:
         st.success("Database and backend connected")
     else:
         st.warning("Start the FastAPI backend")
+    st.divider()
+    st.header("Navigation")
+    page = st.radio(
+        "Open page",
+        ["Patients", "Reports & Labs", "Brain MRI", "Grounded Summary"],
+        key="active_page",
+        on_change=refresh_current_page,
+        label_visibility="collapsed",
+    )
+    st.caption("Pages refresh automatically when navigation, files, or stored data change.")
 
 people = request("GET", "/patients") if health else []
 people = people or []
-tabs = st.tabs(["Patients", "Reports & Labs", "Brain MRI", "Grounded Summary", "🤖 AI Chatbot"])
 
-with tabs[0]:
+if page == "Patients":
     st.subheader("Register a patient")
     with st.form("create_patient", clear_on_submit=True):
         col1, col2 = st.columns(2)
@@ -288,6 +336,7 @@ with tabs[0]:
                             })
                             if updated:
                                 st.success(f"Updated patient details for {updated['name']}.")
+                                clear_generated_results()
                                 st.rerun()
                 
                 st.markdown("##### 🔴 Danger Zone: Delete Patient")
@@ -301,7 +350,7 @@ with tabs[0]:
     else:
         st.info("No patients have been registered.")
 
-with tabs[1]:
+if page == "Reports & Labs":
     st.subheader("Reports and laboratory results")
     patient = patient_selector(people, "reports_patient")
     if patient:
@@ -314,7 +363,7 @@ with tabs[1]:
             )
             report_file = st.file_uploader(
                 "Upload PDF or image", type=["pdf", "png", "jpg", "jpeg", "tif", "tiff"],
-                key="report_upload",
+                key="report_upload", on_change=clear_report_selection,
             )
             if st.button("Upload report", disabled=report_file is None, type="primary"):
                 uploaded = request(
@@ -325,6 +374,7 @@ with tabs[1]:
                 if uploaded:
                     st.session_state["selected_report_id"] = uploaded["resource_id"]
                     st.success("Report stored in the selected patient's record.")
+                    clear_generated_results()
                     st.rerun()
 
         selected_report, reports = report_selector(patient["id"], "stored_report")
@@ -339,12 +389,34 @@ with tabs[1]:
                 hide_index=True,
             )
         if selected_report:
+            with st.expander("Delete selected report", expanded=False):
+                st.warning(
+                    f"Delete **{selected_report['original_filename']}** from "
+                    f"{patient['name']}'s record? This also removes its extracted and "
+                    "laboratory data."
+                )
+                confirm_report_delete = st.checkbox(
+                    "I understand this report will be permanently deleted",
+                    key=f"confirm_report_delete_{selected_report['id']}",
+                )
+                if st.button(
+                    "Permanently delete this report",
+                    key=f"delete_report_{selected_report['id']}",
+                    type="primary",
+                    disabled=not confirm_report_delete,
+                ):
+                    deleted = request("DELETE", f"/reports/{selected_report['id']}")
+                    if deleted:
+                        clear_generated_results()
+                        st.success(deleted["message"])
+                        st.rerun()
             if selected_report["status"] != "extracted":
                 if st.button("Extract selected report", type="primary"):
                     extracted = request("POST", "/extract-report",
                                         params={"report_id": selected_report["id"]})
                     if extracted:
                         st.success("Report extraction completed and saved.")
+                        clear_generated_results()
                         st.rerun()
             else:
                 report = request("GET", f"/reports/{selected_report['id']}")
@@ -355,9 +427,16 @@ with tabs[1]:
                                             params={"report_id": selected_report["id"]})
                         if refreshed:
                             st.success("Extraction and stored laboratory values refreshed.")
+                            clear_generated_results()
                             st.rerun()
-                    st.text_area("Extracted text", report.get("extracted_text", ""), height=260)
-                    st.download_button(
+                    st.text_area(
+                        "Extracted text",
+                        report.get("extracted_text", ""),
+                        height=260,
+                        key=f"extracted_text_{selected_report['id']}",
+                    )
+                    col1, col2 = st.columns(2)
+                    col1.download_button(
                         "📄 Download Extracted Report (PDF)",
                         generate_pdf_bytes(f"Report - {selected_report['original_filename']}", report.get("extracted_text", "")),
                         file_name=f"{selected_report['original_filename']}-extracted.pdf",
@@ -455,7 +534,7 @@ with tabs[1]:
                     use_container_width=True,
                 )
 
-with tabs[2]:
+if page == "Brain MRI":
     st.subheader("Brain MRI")
     st.warning("MRI output is decision support and requires qualified clinical review.")
     patient = patient_selector(people, "mri_patient")
@@ -463,7 +542,7 @@ with tabs[2]:
         detail = request("GET", f"/patient/{patient['id']}") or {}
         scans = detail.get("mri_scans", [])
         mri_file = st.file_uploader(
-            "Upload MRI file", key="mri_upload",
+            "Upload MRI file", key="mri_upload", on_change=clear_mri_selection,
         )
         st.caption(
             "Accepted: NIfTI (.nii/.nii.gz), DICOM (.dcm/.dicom), DICOM ZIP, and "
@@ -477,10 +556,21 @@ with tabs[2]:
             )
             if uploaded:
                 st.success("MRI stored in the selected patient's record.")
+                clear_generated_results()
                 st.rerun()
         if scans:
             choices = {f"{s['modality']} | {s['status']} | {s['id'][:8]}": s for s in scans}
-            scan = choices[st.selectbox("Select stored MRI", list(choices), key="stored_mri")]
+            selected_scan = st.selectbox(
+                "Select stored MRI",
+                list(choices),
+                index=None,
+                placeholder="Choose a stored MRI",
+                key="stored_mri",
+            )
+            if selected_scan is None:
+                st.info("Select a stored MRI to load its information.")
+                st.stop()
+            scan = choices[selected_scan]
             m1, m2, m3 = st.columns(3)
             m1.metric("Modality", scan["modality"])
             m2.metric("Status", scan["status"].title())
@@ -510,6 +600,7 @@ with tabs[2]:
                 analyzed = request("POST", "/analyze-mri", params={"mri_id": scan["id"]})
                 if analyzed:
                     st.success("MRI analysis completed.")
+                    clear_generated_results()
                     st.rerun()
             if scan.get("result") and scan["result"].get("overlay_path"):
                 overlay = request("GET", f"/mri/{scan['id']}/overlay")
@@ -522,7 +613,7 @@ with tabs[2]:
         else:
             st.info("No MRI scans stored for this patient.")
 
-with tabs[3]:
+if page == "Grounded Summary":
     st.subheader("Grounded patient summary")
     st.caption("Uses only patient details and text extracted from stored reports. No demo facts are added.")
     patient = patient_selector(people, "summary_patient")

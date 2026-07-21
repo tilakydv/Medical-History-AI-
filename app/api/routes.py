@@ -166,6 +166,47 @@ def get_report(report_id: str, db: DB) -> Report:
     return report
 
 
+@router.delete("/reports/{report_id}", tags=["reports"])
+def delete_report(report_id: str, db: DB) -> dict[str, str]:
+    """Delete one report and its associated extracted/laboratory/upload data."""
+    report = db.get(Report, report_id)
+    if not report:
+        raise NotFoundError("Report not found")
+    upload = db.get(Upload, report.upload_id)
+    filename = upload.original_filename if upload else report_id
+    stored_path = Path(upload.stored_path) if upload else None
+
+    lab_report = db.scalar(
+        select(LaboratoryReport).where(LaboratoryReport.report_id == report_id)
+    )
+    if lab_report:
+        db.execute(
+            delete(LaboratoryValue).where(
+                LaboratoryValue.lab_report_id == lab_report.id
+            )
+        )
+        db.execute(delete(LaboratoryReport).where(LaboratoryReport.id == lab_report.id))
+
+    db.execute(
+        delete(TimelineEvent).where(
+            TimelineEvent.source_type == "report",
+            TimelineEvent.source_id == report_id,
+        )
+    )
+    db.execute(delete(Report).where(Report.id == report_id))
+    if upload:
+        db.execute(delete(Upload).where(Upload.id == upload.id))
+    db.commit()
+
+    if stored_path:
+        upload_root = get_settings().upload_dir.resolve()
+        resolved_path = stored_path.resolve()
+        if resolved_path.is_relative_to(upload_root) and resolved_path.is_file():
+            resolved_path.unlink(missing_ok=True)
+
+    return {"message": f"Report {filename} deleted successfully.", "id": report_id}
+
+
 @router.get("/patients/{patient_id}/reports", tags=["reports"])
 def patient_reports(patient_id: str, db: DB) -> list[dict[str, Any]]:
     """List persisted reports with their source filename for patient-facing selection."""
