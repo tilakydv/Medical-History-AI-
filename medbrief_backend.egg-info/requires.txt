@@ -21,7 +21,7 @@ torch<3,>=2.4
 
 [ocr]
 paddleocr<3,>=2.9
-paddlepaddle<4,>=2.6
+paddlepaddle<3,>=2.6
 opencv-python-headless<5,>=4.10
 
 [postgres]

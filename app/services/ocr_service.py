@@ -101,3 +101,30 @@ class OCRService:
         text = re.sub(r"\n{3,}", "\n\n", text)
         return text.strip()
 
+    PATIENT_NAME_HEADER = re.compile(
+        r"(?:patient\s+name|name\s+of\s+patient|patient['’]?s\s+name|pt\s+name|patient)\s*[:|-]\s*([A-Za-z\s.,'-]{2,60})",
+        re.IGNORECASE,
+    )
+
+    def verify_patient_name(self, extracted_text: str, patient_name: str) -> None:
+        """Verifies that if a patient name header exists in the document, it matches the registered patient."""
+        if not extracted_text or not patient_name:
+            return
+        reg_tokens = {w.lower() for w in re.findall(r"[A-Za-z]{2,}", patient_name)}
+        if not reg_tokens:
+            return
+
+        for line in extracted_text.splitlines()[:30]:
+            match = self.PATIENT_NAME_HEADER.search(line)
+            if match:
+                doc_name_raw = match.group(1).strip()
+                doc_name_clean = re.split(
+                    r"\b(?:age|sex|gender|dob|date|mrn|id|ref|doctor|dr)\b", doc_name_raw, flags=re.IGNORECASE
+                )[0].strip()
+                doc_tokens = {w.lower() for w in re.findall(r"[A-Za-z]{2,}", doc_name_clean)}
+                doc_tokens -= {"male", "female", "other", "years", "yrs", "year", "old", "name"}
+                if doc_tokens and not (reg_tokens & doc_tokens):
+                    raise ProcessingError(
+                        f"Document patient name ('{doc_name_clean}') does not match registered patient ('{patient_name}')"
+                    )
+

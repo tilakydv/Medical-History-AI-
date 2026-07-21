@@ -19,7 +19,7 @@ Provides-Extra: postgres
 Requires-Dist: psycopg[binary]<4,>=3.2; extra == "postgres"
 Provides-Extra: ocr
 Requires-Dist: paddleocr<3,>=2.9; extra == "ocr"
-Requires-Dist: paddlepaddle<4,>=2.6; extra == "ocr"
+Requires-Dist: paddlepaddle<3,>=2.6; extra == "ocr"
 Requires-Dist: opencv-python-headless<5,>=4.10; extra == "ocr"
 Provides-Extra: mri
 Requires-Dist: monai<2,>=1.4; extra == "mri"

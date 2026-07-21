@@ -4,6 +4,7 @@ import os
 from datetime import date
 from typing import Any
 
+import fitz
 import httpx
 import streamlit as st
 
@@ -42,6 +43,127 @@ def csv_bytes(rows: list[dict[str, Any]]) -> bytes:
     writer.writeheader()
     writer.writerows(rows)
     return output.getvalue().encode("utf-8-sig")
+
+
+def format_patient_record_text(detail: dict[str, Any]) -> str:
+    lines = [
+        "=" * 60,
+        "MEDBRIEF CLINICAL PATIENT RECORD",
+        "=" * 60,
+        f"Patient Name : {detail.get('name', 'N/A')}",
+        f"External ID  : {detail.get('external_id') or 'Not recorded'}",
+        f"Date of Birth: {detail.get('date_of_birth') or 'Not recorded'}",
+        f"Sex          : {detail.get('sex') or 'Not recorded'}",
+        f"Patient ID   : {detail.get('id', 'N/A')}",
+        f"Registered   : {detail.get('created_at', 'N/A')}",
+        "",
+        "-" * 60,
+        f"STORED REPORTS ({len(detail.get('reports', []))})",
+        "-" * 60,
+    ]
+    reports = detail.get("reports", [])
+    if not reports:
+        lines.append("No reports stored.")
+    for r in reports:
+        lines.append(f"• File: {r.get('original_filename', 'N/A')} | Type: {r.get('report_type', '')} | Status: {r.get('status', '')}")
+        lines.append(f"  Uploaded: {r.get('created_at', '')}")
+        if r.get("extracted_text"):
+            lines.append("  Extracted Text:")
+            for t_line in r["extracted_text"].splitlines():
+                lines.append(f"    {t_line}")
+        lines.append("")
+
+    mri_scans = detail.get("mri_scans", [])
+    lines.extend([
+        "-" * 60,
+        f"STORED MRI SCANS ({len(mri_scans)})",
+        "-" * 60,
+    ])
+    if not mri_scans:
+        lines.append("No MRI scans stored.")
+    for scan in mri_scans:
+        lines.append(f"• Modality: {scan.get('modality', 'MRI')} | Format: {scan.get('format', '')} | Status: {scan.get('status', '')}")
+        if scan.get("result"):
+            res = scan["result"]
+            lines.append(f"  Tumor Volume: {res.get('tumor_volume_mm3', 0)} mm³")
+            lines.append(f"  Confidence  : {res.get('confidence_score', 'N/A')}")
+        lines.append("")
+
+    lines.append("=" * 60)
+    return "\n".join(lines)
+
+
+def format_mri_text(scan: dict[str, Any], patient_name: str) -> str:
+    lines = [
+        "=" * 60,
+        f"BRAIN MRI RECORD - {patient_name.upper()}",
+        "=" * 60,
+        f"Modality   : {scan.get('modality', 'MRI')}",
+        f"Format     : {scan.get('format', 'N/A')}",
+        f"Status     : {scan.get('status', 'N/A')}",
+        f"Study Date : {scan.get('study_date') or 'Not recorded'}",
+        f"Created    : {scan.get('created_at', 'N/A')}",
+        "",
+    ]
+    if scan.get("result"):
+        res = scan["result"]
+        lines.extend([
+            "-" * 60,
+            "ANALYSIS RESULTS",
+            "-" * 60,
+            f"Model Name  : {res.get('model_name', 'N/A')}",
+            f"Tumor Volume: {res.get('tumor_volume_mm3', 0)} mm³",
+            f"Confidence  : {res.get('confidence_score', 'N/A')}",
+            f"Localization: {res.get('localization', {})}",
+        ])
+    lines.append("=" * 60)
+    return "\n".join(lines)
+
+
+def generate_pdf_bytes(title: str, content: str) -> bytes:
+    try:
+        doc = fitz.open()
+        page_width, page_height = 595.0, 842.0
+        margin = 40.0
+        usable_height = page_height - (2 * margin)
+        lines = content.splitlines() or ["No content available."]
+        line_height = 14
+        lines_per_page = max(1, int((usable_height - 50) // line_height))
+
+        current_line = 0
+        total_lines = len(lines)
+
+        while current_line < total_lines:
+            page = doc.new_page(width=page_width, height=page_height)
+            page.insert_text(fitz.Point(margin, margin + 12), title.upper()[:60], fontsize=12, fontname="helv")
+            page.draw_line(
+                fitz.Point(margin, margin + 20),
+                fitz.Point(page_width - margin, margin + 20),
+                color=(0.1, 0.4, 0.8),
+                width=1.5,
+            )
+
+            y = margin + 40
+            chunk = lines[current_line : current_line + lines_per_page]
+            for line in chunk:
+                page.insert_text(fitz.Point(margin, y), line[:110], fontsize=9, fontname="helv")
+                y += line_height
+
+            current_line += lines_per_page
+            footer_text = f"MedBrief AI Clinical System  |  Page {doc.page_count}"
+            page.insert_text(
+                fitz.Point(margin, page_height - margin + 10),
+                footer_text,
+                fontsize=8,
+                fontname="helv",
+                color=(0.5, 0.5, 0.5),
+            )
+
+        pdf_output = doc.tobytes()
+        doc.close()
+        return pdf_output
+    except Exception:
+        return f"{title}\n\n{content}".encode("utf-8")
 
 
 def patient_selector(people: list[dict[str, Any]], key: str) -> dict[str, Any] | None:
@@ -96,7 +218,7 @@ with tabs[0]:
         col1, col2 = st.columns(2)
         name = col1.text_input("Full name")
         external_id = col2.text_input("Hospital / external ID")
-        dob = col1.date_input("Date of birth", value=None, max_value=date.today())
+        dob = col1.date_input("Date of birth", value=None, min_value=date(1900, 1, 1), max_value=date.today())
         sex = col2.selectbox("Sex", ["", "Female", "Male", "Other", "Unknown"])
         submitted = st.form_submit_button("Register patient", type="primary")
     if submitted:
@@ -124,6 +246,8 @@ with tabs[0]:
             use_container_width=True,
             hide_index=True,
         )
+        st.markdown("---")
+        st.subheader("Manage or Delete Patient Record")
         selected = patient_selector(people, "patients_patient")
         if selected:
             detail = request("GET", f"/patient/{selected['id']}")
@@ -132,17 +256,48 @@ with tabs[0]:
                 col1.metric("Stored reports", len(detail.get("reports", [])))
                 col2.metric("Stored MRI scans", len(detail.get("mri_scans", [])))
                 col3.metric("External ID", detail.get("external_id") or "Not recorded")
+                
                 st.download_button(
-                    "Download patient record (CSV)", csv_bytes([{
-                        "patient_id": detail["id"], "name": detail["name"],
-                        "external_id": detail.get("external_id"),
-                        "date_of_birth": detail.get("date_of_birth"),
-                        "sex": detail.get("sex"), "registered": detail["created_at"],
-                        "stored_reports": len(detail.get("reports", [])),
-                        "stored_mri_scans": len(detail.get("mri_scans", [])),
-                    }]),
-                    file_name=f"{selected['name']}-patient-record.csv", mime="text/csv",
+                    "📄 Download Patient Record (PDF)",
+                    generate_pdf_bytes(f"Patient Record - {selected['name']}", format_patient_record_text(detail)),
+                    file_name=f"{selected['name']}-patient-record.pdf",
+                    mime="application/pdf",
+                    use_container_width=True,
                 )
+                
+                with st.expander("✏️ Edit Patient Details", expanded=False):
+                    with st.form(f"edit_patient_{selected['id']}"):
+                        edit_col1, edit_col2 = st.columns(2)
+                        new_name = edit_col1.text_input("Full name", value=selected["name"])
+                        new_ext_id = edit_col2.text_input("Hospital / external ID", value=selected.get("external_id") or "")
+                        current_dob = date.fromisoformat(selected["date_of_birth"]) if selected.get("date_of_birth") else None
+                        new_dob = edit_col1.date_input("Date of birth", value=current_dob, min_value=date(1900, 1, 1), max_value=date.today())
+                        sex_options = ["", "Female", "Male", "Other", "Unknown"]
+                        current_sex_idx = sex_options.index(selected["sex"]) if selected.get("sex") in sex_options else 0
+                        new_sex = edit_col2.selectbox("Sex", sex_options, index=current_sex_idx)
+                        save_submitted = st.form_submit_button("Save Patient Changes", type="primary")
+                    if save_submitted:
+                        if not new_name.strip():
+                            st.error("Patient name is required.")
+                        else:
+                            updated = request("PATCH", f"/patients/{selected['id']}", json={
+                                "name": new_name.strip(),
+                                "external_id": new_ext_id.strip() or None,
+                                "date_of_birth": new_dob.isoformat() if new_dob else None,
+                                "sex": new_sex or None,
+                            })
+                            if updated:
+                                st.success(f"Updated patient details for {updated['name']}.")
+                                st.rerun()
+                
+                st.markdown("##### 🔴 Danger Zone: Delete Patient")
+                st.warning(f"Delete patient **{selected['name']}** (ID: `{selected['id']}`)? This purges all reports, lab data, MRI scans, and files permanently.")
+                confirm_del = st.checkbox(f"Confirm I want to permanently delete {selected['name']}", key=f"chk_del_{selected['id']}")
+                if st.button(f"🗑️ Permanently Delete {selected['name']}", key=f"btn_del_{selected['id']}", type="primary", disabled=not confirm_del, use_container_width=True):
+                    deleted = request("DELETE", f"/patients/{selected['id']}")
+                    if deleted:
+                        st.success(f"Patient {selected['name']} deleted successfully from memory.")
+                        st.rerun()
     else:
         st.info("No patients have been registered.")
 
@@ -204,19 +359,14 @@ with tabs[1]:
                     st.text_area("Extracted text", report.get("extracted_text", ""), height=260)
                     col1, col2 = st.columns(2)
                     col1.download_button(
-                        "Download extracted text", (report.get("extracted_text") or "").encode("utf-8"),
-                        file_name=f"{selected_report['original_filename']}-extracted.txt",
-                        mime="text/plain",
+                        "📄 Download Extracted Report (PDF)",
+                        generate_pdf_bytes(f"Report - {selected_report['original_filename']}", report.get("extracted_text", "")),
+                        file_name=f"{selected_report['original_filename']}-extracted.pdf",
+                        mime="application/pdf",
                     )
                     col2.download_button(
-                        "Download report details (CSV)", csv_bytes([{
-                            "report_id": report["id"], "patient_id": report["patient_id"],
-                            "filename": selected_report["original_filename"],
-                            "report_type": report["report_type"], "status": report["status"],
-                            "extraction_method": report.get("extraction_method"),
-                            "report_date": report.get("report_date"),
-                        }]),
-                        file_name=f"{selected_report['original_filename']}-details.csv",
+                        "📊 Download Report Pages (CSV)", csv_bytes(report.get("structured_data", {}).get("pages", [])),
+                        file_name=f"{selected_report['original_filename']}-pages.csv",
                         mime="text/csv",
                     )
                     report_type = selected_report["report_type"].lower()
@@ -237,8 +387,15 @@ with tabs[1]:
                         rows = overview["key_findings"] + overview["within_reference_range"]
                         if rows:
                             st.dataframe(rows, use_container_width=True, hide_index=True)
-                        st.download_button(
-                            "Download lab values (CSV)", csv_bytes(rows),
+                        d1, d2 = st.columns(2)
+                        d1.download_button(
+                            "📄 Download Lab Overview (PDF)",
+                            generate_pdf_bytes(f"Lab Overview - {selected_report['original_filename']}", overview.get("summary_markdown", "")),
+                            file_name=f"{selected_report['original_filename']}-labs-overview.pdf",
+                            mime="application/pdf",
+                        )
+                        d2.download_button(
+                            "📊 Download Lab Values (CSV)", csv_bytes(rows),
                             file_name=f"{selected_report['original_filename']}-labs.csv",
                             mime="text/csv",
                         )
@@ -312,10 +469,15 @@ with tabs[1]:
                     {"test": test, **entry}
                     for test, entries in trends["series"].items() for entry in entries
                 ]
-                st.dataframe(flat_rows, use_container_width=True, hide_index=True)
-                st.download_button(
-                    "Download trends (CSV)", csv_bytes(flat_rows),
+                c1, c2 = st.columns(2)
+                c1.download_button(
+                    "📊 Download Trends (CSV)", csv_bytes(flat_rows),
                     file_name=f"{patient['name']}-lab-trends.csv", mime="text/csv",
+                )
+                c2.download_button(
+                    "📄 Download Trends (PDF)",
+                    generate_pdf_bytes(f"Lab Trends - {patient['name']}", format_patient_record_text(detail)),
+                    file_name=f"{patient['name']}-lab-trends.pdf", mime="application/pdf",
                 )
 
 with tabs[2]:
@@ -360,14 +522,9 @@ with tabs[2]:
                     "Findings": str(result.get("findings") or "Not recorded"),
                 }], use_container_width=True, hide_index=True)
             st.download_button(
-                "Download MRI information (CSV)", csv_bytes([{
-                    "mri_id": scan["id"], "patient_id": scan["patient_id"],
-                    "modality": scan["modality"], "format": scan["format"],
-                    "study_date": scan.get("study_date"), "status": scan["status"],
-                    "tumor_volume_mm3": result.get("tumor_volume_mm3") if result else None,
-                    "confidence": result.get("confidence_score") if result else None,
-                }]),
-                file_name=f"{patient['name']}-mri-{scan['id'][:8]}.csv", mime="text/csv",
+                "📄 Download MRI Report (PDF)",
+                generate_pdf_bytes(f"Brain MRI Report - {patient['name']}", format_mri_text(scan, patient['name'])),
+                file_name=f"{patient['name']}-mri-{scan['id'][:8]}.pdf", mime="application/pdf",
             )
             analysis_supported = (scan.get("metadata_json") or {}).get("format") == "nifti"
             if scan["status"] != "analyzed" and st.button(
@@ -405,24 +562,16 @@ with tabs[3]:
         summary = st.session_state.get(f"summary_{patient['id']}")
         if summary:
             st.markdown(summary["narrative_summary_markdown"])
-            summary_sections = {
-                "Medical history": summary.get("medical_history", []),
-                "Diagnoses": summary.get("diagnoses", []),
-                "Current conditions": summary.get("current_conditions", []),
-                "Laboratory observations": summary.get("laboratory_observations", []),
-                "Current medications": summary.get("current_medications", []),
-                "Allergies": summary.get("allergies", []),
-                "Documented follow-up": summary.get("recommended_follow_up", []),
-            }
-            with st.expander("Summary details"):
-                for heading, items in summary_sections.items():
-                    st.markdown(f"**{heading}**")
-                    if items:
-                        st.markdown("\n".join(f"- {item}" for item in items))
-                    else:
-                        st.caption("Not found in the extracted records.")
-            st.download_button(
-                "Download summary (Markdown)", summary["narrative_summary_markdown"].encode("utf-8"),
+            with st.expander("Structured summary data"):
+                st.json(summary)
+            col1, col2 = st.columns(2)
+            col1.download_button(
+                "📄 Download Grounded Summary (PDF)",
+                generate_pdf_bytes(f"Grounded Summary - {patient['name']}", summary["narrative_summary_markdown"]),
+                file_name=f"{patient['name']}-grounded-summary.pdf", mime="application/pdf",
+            )
+            col2.download_button(
+                "📝 Download Summary (Markdown)", summary["narrative_summary_markdown"].encode("utf-8"),
                 file_name=f"{patient['name']}-grounded-summary.md", mime="text/markdown",
             )
         record = request("GET", f"/clinical-intel/{patient['id']}/record")
@@ -440,6 +589,7 @@ with tabs[3]:
                     for document in documents
                 )
                 st.download_button(
-                    "Download all extracted source text", combined_text.encode("utf-8"),
-                    file_name=f"{patient['name']}-extracted-records.txt", mime="text/plain",
+                    "📄 Download Full Patient Record (PDF)",
+                    generate_pdf_bytes(f"Full Patient Record - {patient['name']}", format_patient_record_text(detail)),
+                    file_name=f"{patient['name']}-full-record.pdf", mime="application/pdf",
                 )

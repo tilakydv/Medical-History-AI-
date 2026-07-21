@@ -15,6 +15,13 @@ class PatientCreate(BaseModel):
     sex: str | None = Field(default=None, max_length=30)
 
 
+class PatientUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    external_id: str | None = Field(default=None, max_length=100)
+    date_of_birth: date | None = None
+    sex: str | None = Field(default=None, max_length=30)
+
+
 class PatientRead(ORMModel):
     id: str
     external_id: str | None
