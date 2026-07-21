@@ -117,6 +117,27 @@ def get_report(report_id: str, db: DB) -> Report:
     return report
 
 
+@router.get("/patients/{patient_id}/reports", tags=["reports"])
+def patient_reports(patient_id: str, db: DB) -> list[dict[str, Any]]:
+    """List persisted reports with their source filename for patient-facing selection."""
+    if not db.get(Patient, patient_id):
+        raise NotFoundError("Patient not found")
+    rows = db.execute(
+        select(Report, Upload)
+        .join(Upload, Upload.id == Report.upload_id)
+        .where(Report.patient_id == patient_id)
+        .order_by(Report.created_at.desc())
+    ).all()
+    return [
+        {
+            **ReportRead.model_validate(report).model_dump(mode="json"),
+            "original_filename": upload.original_filename,
+            "upload_status": upload.status,
+        }
+        for report, upload in rows
+    ]
+
+
 @router.get("/reports/{report_id}/lab-overview", tags=["laboratory"])
 def report_lab_overview(report_id: str, db: DB) -> dict[str, Any]:
     report = db.get(Report, report_id)

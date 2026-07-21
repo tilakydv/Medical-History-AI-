@@ -90,7 +90,15 @@ def test_clinical_intelligence_uses_persisted_ocr_record(client):
     summary = client.post(f"/clinical-intel/{person['id']}/summary")
     assert summary.status_code == 200
     assert summary.json()["patient_id"] == person["id"]
-    assert summary.json()["narrative_summary_markdown"]
+    markdown = summary.json()["narrative_summary_markdown"]
+    assert "Hemoglobin 11.2" in markdown
+    assert "Grounded Patient Summary" in markdown
+    assert "Brain Tumor" not in markdown
+
+    reports = client.get(f"/patients/{person['id']}/reports")
+    assert reports.status_code == 200
+    assert reports.json()[0]["original_filename"] == "history.pdf"
+    assert reports.json()[0]["status"] == "extracted"
 
 
 def test_clinical_chat_uses_patient_context(client):
