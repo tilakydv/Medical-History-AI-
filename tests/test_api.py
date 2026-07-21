@@ -110,3 +110,55 @@ def test_clinical_chat_uses_patient_context(client):
     assert response.status_code == 200
     assert response.json()["patient_id"] == person["id"]
     assert response.json()["is_grounded"] is True
+
+
+def test_delete_patient(client):
+    person = patient(client)
+    person_id = person["id"]
+    uploaded = client.post(
+        "/upload-report",
+        data={"patient_id": person_id, "report_type": "laboratory"},
+        files={"file": ("lab.pdf", pdf_bytes(), "application/pdf")},
+    )
+    assert uploaded.status_code == 200
+
+    del_resp = client.delete(f"/patients/{person_id}")
+    assert del_resp.status_code == 200
+    assert del_resp.json()["id"] == person_id
+
+    get_resp = client.get(f"/patient/{person_id}")
+    assert get_resp.status_code == 404
+
+
+def test_update_patient(client):
+    person = patient(client)
+    person_id = person["id"]
+    patch_resp = client.patch(f"/patients/{person_id}", json={"name": "Updated Name", "external_id": "P-999"})
+    assert patch_resp.status_code == 200
+    assert patch_resp.json()["name"] == "Updated Name"
+    assert patch_resp.json()["external_id"] == "P-999"
+
+    get_resp = client.get(f"/patient/{person_id}")
+    assert get_resp.status_code == 200
+    assert get_resp.json()["name"] == "Updated Name"
+
+
+def test_rejects_mismatched_patient_document(client):
+    person = patient(client)
+    document = fitz.open()
+    page = document.new_page()
+    page.insert_text((72, 72), "Patient Name: Alex Smith\nHemoglobin 14.2 g/dL 12.0-16.0")
+    content = document.tobytes()
+    document.close()
+
+    uploaded = client.post(
+        "/upload-report",
+        data={"patient_id": person["id"], "report_type": "laboratory"},
+        files={"file": ("mismatched.pdf", content, "application/pdf")},
+    )
+    assert uploaded.status_code == 200
+    report_id = uploaded.json()["resource_id"]
+
+    extracted = client.post("/extract-report", params={"report_id": report_id})
+    assert extracted.status_code == 422
+    assert "does not match registered patient" in extracted.json()["message"]

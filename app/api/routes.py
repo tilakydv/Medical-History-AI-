@@ -1,17 +1,18 @@
+import shutil
 from pathlib import Path
 from typing import Annotated, Any
 
 from fastapi import APIRouter, File, Form, Query, UploadFile
 from fastapi.responses import FileResponse
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import selectinload
 
 from app.api.deps import DB
 from app.core.config import get_settings
 from app.core.exceptions import NotFoundError
-from app.models import LaboratoryReport, MRIResult, MRIScan, Patient, Report, Upload
+from app.models import LaboratoryReport, LaboratoryValue, MRIResult, MRIScan, Patient, Report, TimelineEvent, Upload
 from app.schemas.common import (LabReportRead, MRIRead, PatientCreate, PatientDetail,
-                                PatientRead, ReportRead, UploadRead, UploadResponse)
+                                PatientRead, PatientUpdate, ReportRead, UploadRead, UploadResponse)
 from app.services.integration_service import LLMIntegrationService
 from app.services.lab_service import LaboratoryService
 from app.services.mri_service import MRIService
@@ -33,6 +34,20 @@ def create_patient(payload: PatientCreate, db: DB) -> Patient:
 @router.get("/patients", response_model=list[PatientRead], tags=["patients"])
 def list_patients(db: DB) -> list[Patient]:
     return list(db.scalars(select(Patient).order_by(Patient.created_at.desc())).all())
+
+
+@router.patch("/patients/{patient_id}", response_model=PatientRead, tags=["patients"])
+@router.put("/patients/{patient_id}", response_model=PatientRead, tags=["patients"])
+def update_patient(patient_id: str, payload: PatientUpdate, db: DB) -> Patient:
+    patient = db.get(Patient, patient_id)
+    if not patient:
+        raise NotFoundError("Patient not found")
+    data = payload.model_dump(exclude_unset=True)
+    for key, value in data.items():
+        setattr(patient, key, value)
+    db.commit()
+    db.refresh(patient)
+    return patient
 
 
 @router.post("/upload-report", response_model=UploadResponse, tags=["reports"])
@@ -65,7 +80,11 @@ def extract_report(report_id: Annotated[str, Query()], db: DB) -> Report:
     upload = db.get(Upload, report.upload_id)
     if not upload:
         raise NotFoundError("Source upload not found")
-    result = OCRService(get_settings().ocr_lang).extract(Path(upload.stored_path))
+    patient = db.get(Patient, report.patient_id)
+    ocr_service = OCRService(get_settings().ocr_lang)
+    result = ocr_service.extract(Path(upload.stored_path))
+    if patient:
+        ocr_service.verify_patient_name(result.text, patient.name)
     report.extracted_text = result.text
     report.extraction_method = result.method
     report.structured_data = {"pages": result.pages}
@@ -107,6 +126,35 @@ def get_patient(patient_id: str, db: DB) -> Patient:
     if not patient:
         raise NotFoundError("Patient not found")
     return patient
+
+
+@router.delete("/patients/{patient_id}", tags=["patients"])
+@router.delete("/patient/{patient_id}", tags=["patients"])
+def delete_patient(patient_id: str, db: DB) -> dict[str, str]:
+    patient = db.get(Patient, patient_id)
+    if not patient:
+        raise NotFoundError("Patient not found")
+    patient_name = patient.name
+
+    db.execute(delete(LaboratoryValue).where(LaboratoryValue.patient_id == patient_id))
+    db.execute(delete(LaboratoryReport).where(LaboratoryReport.patient_id == patient_id))
+    db.execute(delete(Report).where(Report.patient_id == patient_id))
+
+    mri_scan_ids = list(db.scalars(select(MRIScan.id).where(MRIScan.patient_id == patient_id)).all())
+    if mri_scan_ids:
+        db.execute(delete(MRIResult).where(MRIResult.mri_scan_id.in_(mri_scan_ids)))
+    db.execute(delete(MRIScan).where(MRIScan.patient_id == patient_id))
+
+    db.execute(delete(Upload).where(Upload.patient_id == patient_id))
+    db.execute(delete(TimelineEvent).where(TimelineEvent.patient_id == patient_id))
+    db.execute(delete(Patient).where(Patient.id == patient_id))
+    db.commit()
+
+    patient_dir = get_settings().upload_dir / patient_id
+    if patient_dir.exists() and patient_dir.is_dir():
+        shutil.rmtree(patient_dir, ignore_errors=True)
+
+    return {"message": f"Patient {patient_name} and all associated data deleted successfully.", "id": patient_id}
 
 
 @router.get("/reports/{report_id}", response_model=ReportRead, tags=["reports"])

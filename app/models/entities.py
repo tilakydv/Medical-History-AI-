@@ -24,8 +24,10 @@ class Patient(Base):
     date_of_birth: Mapped[date | None] = mapped_column(Date)
     sex: Mapped[str | None] = mapped_column(String(30))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-    reports: Mapped[list["Report"]] = relationship(back_populates="patient")
-    mri_scans: Mapped[list["MRIScan"]] = relationship(back_populates="patient")
+    reports: Mapped[list["Report"]] = relationship(back_populates="patient", cascade="all, delete-orphan")
+    mri_scans: Mapped[list["MRIScan"]] = relationship(back_populates="patient", cascade="all, delete-orphan")
+    uploads: Mapped[list["Upload"]] = relationship(cascade="all, delete-orphan")
+    timeline_events: Mapped[list["TimelineEvent"]] = relationship(cascade="all, delete-orphan")
 
 
 class Upload(Base):
