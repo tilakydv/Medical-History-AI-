@@ -250,7 +250,7 @@ with st.sidebar:
     st.header("Navigation")
     page = st.radio(
         "Open page",
-        ["Patients", "Reports & Labs", "Brain MRI", "Grounded Summary"],
+        ["Patients", "Reports & Labs", "Brain MRI", "Grounded Summary", "AI Chatbot"],
         key="active_page",
         on_change=refresh_current_page,
         label_visibility="collapsed",
@@ -657,7 +657,7 @@ if page == "Grounded Summary":
                     file_name=f"{patient['name']}-full-record.pdf", mime="application/pdf",
                 )
 
-with tabs[4]:
+if page == "AI Chatbot":
     st.subheader("🤖 AI Clinical Chatbot")
     st.caption("Ask any question about the patient's medical history, lab results, diagnoses, medications, or MRI scans.")
     patient = patient_selector(people, "chat_patient")
