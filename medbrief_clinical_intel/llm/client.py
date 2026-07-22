@@ -22,7 +22,41 @@ class QwenLLMClient:
         self.pipeline = None
         self.is_loaded = False
 
-        if not self.config.use_mock_llm:
+        # Auto-promote provider if default/mock is set but external API keys/urls are configured
+        if self.config.llm_provider == "mock":
+            if os.getenv("LLM_PROVIDER"):
+                self.config.llm_provider = os.getenv("LLM_PROVIDER")
+            elif self.config.gemini_api_key:
+                self.config.llm_provider = "gemini"
+            elif self.config.openai_api_key:
+                self.config.llm_provider = "openai"
+            elif os.getenv("OLLAMA_API_URL") or os.getenv("OLLAMA_MODEL"):
+                self.config.llm_provider = "ollama"
+            elif not self.config.use_mock_llm:
+                self.config.llm_provider = "huggingface"
+
+        provider = self.config.llm_provider
+
+        if provider == "gemini":
+            if self.config.gemini_api_key:
+                self.is_loaded = True
+                logger.info("QwenLLMClient loaded with Google Gemini provider.")
+            else:
+                logger.warning("Gemini API key is missing. Falling back to mock LLM.")
+                self.config.llm_provider = "mock"
+                self.is_loaded = False
+        elif provider == "openai":
+            if self.config.openai_api_key:
+                self.is_loaded = True
+                logger.info("QwenLLMClient loaded with OpenAI provider.")
+            else:
+                logger.warning("OpenAI API key is missing. Falling back to mock LLM.")
+                self.config.llm_provider = "mock"
+                self.is_loaded = False
+        elif provider == "ollama":
+            self.is_loaded = True
+            logger.info(f"QwenLLMClient loaded with Ollama provider (URL: {self.config.ollama_api_url}, model: {self.config.ollama_model}).")
+        elif provider == "huggingface":
             self._try_load_model()
         else:
             logger.info("QwenLLMClient running in MOCK mode for development/testing.")
@@ -72,6 +106,7 @@ class QwenLLMClient:
             )
             self.is_loaded = False
             self.config.use_mock_llm = True
+            self.config.llm_provider = "mock"
 
     def generate(
         self,
@@ -80,10 +115,19 @@ class QwenLLMClient:
         max_new_tokens: Optional[int] = None,
         temperature: Optional[float] = None
     ) -> str:
-        """Generate text completion from Qwen2.5-14B-Instruct model."""
+        """Generate text completion from configured LLM provider."""
         sys_prompt = system_prompt or SystemPrompts.CLINICAL_INTEL_SYSTEM
 
-        if self.is_loaded and self.pipeline is not None:
+        # If chatbot-only-llm is active, verify that this is indeed a chatbot request
+        # Chatbot request is identified by having CHATBOT_RAG_SYSTEM as the system prompt
+        from medbrief_clinical_intel.llm.prompt_templates import SystemPrompts
+        if self.config.chatbot_only_llm and sys_prompt != SystemPrompts.CHATBOT_RAG_SYSTEM:
+            logger.debug("Redirecting non-chatbot query to mock response generator")
+            return self._generate_mock_response(prompt, sys_prompt)
+
+        provider = self.config.llm_provider
+
+        if provider == "huggingface" and self.is_loaded and self.pipeline is not None:
             messages = [
                 {"role": "system", "content": sys_prompt},
                 {"role": "user", "content": prompt}
@@ -108,7 +152,129 @@ class QwenLLMClient:
                 return generated_text.split("<|im_start|>assistant\n")[-1].replace("<|im_end|>", "").strip()
             return generated_text[len(prompt_text):].strip()
 
+        elif provider == "gemini" and self.is_loaded:
+            return self._generate_gemini(prompt, sys_prompt, max_new_tokens, temperature)
+
+        elif provider == "openai" and self.is_loaded:
+            return self._generate_openai(prompt, sys_prompt, max_new_tokens, temperature)
+
+        elif provider == "ollama" and self.is_loaded:
+            return self._generate_ollama(prompt, sys_prompt, max_new_tokens, temperature)
+
         return self._generate_mock_response(prompt, sys_prompt)
+
+    def _generate_gemini(
+        self,
+        prompt: str,
+        system_prompt: str,
+        max_new_tokens: Optional[int] = None,
+        temperature: Optional[float] = None
+    ) -> str:
+        import httpx
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={self.config.gemini_api_key}"
+        payload = {
+            "contents": [
+                {
+                    "parts": [
+                        {
+                            "text": prompt
+                        }
+                    ]
+                }
+            ],
+            "systemInstruction": {
+                "parts": [
+                    {
+                        "text": system_prompt
+                    }
+                ]
+            },
+            "generationConfig": {
+                "temperature": temperature if temperature is not None else self.config.temperature,
+                "maxOutputTokens": max_new_tokens or self.config.max_new_tokens
+            }
+        }
+        try:
+            response = httpx.post(url, json=payload, timeout=60.0)
+            response.raise_for_status()
+            res_json = response.json()
+            candidates = res_json.get("candidates", [])
+            if candidates:
+                content = candidates[0].get("content", {})
+                parts = content.get("parts", [])
+                if parts:
+                    return parts[0].get("text", "").strip()
+            raise RuntimeError(f"Unexpected response structure from Gemini API: {res_json}")
+        except Exception as e:
+            logger.error(f"Gemini API request failed: {e}")
+            raise RuntimeError(f"Gemini API request failed: {e}")
+
+    def _generate_openai(
+        self,
+        prompt: str,
+        system_prompt: str,
+        max_new_tokens: Optional[int] = None,
+        temperature: Optional[float] = None
+    ) -> str:
+        import httpx
+        url = f"{self.config.openai_api_base}/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {self.config.openai_api_key}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": self.config.openai_model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt}
+            ],
+            "temperature": temperature if temperature is not None else self.config.temperature,
+            "max_tokens": max_new_tokens or self.config.max_new_tokens
+        }
+        try:
+            response = httpx.post(url, json=payload, headers=headers, timeout=60.0)
+            response.raise_for_status()
+            res_json = response.json()
+            choices = res_json.get("choices", [])
+            if choices:
+                return choices[0].get("message", {}).get("content", "").strip()
+            raise RuntimeError(f"Unexpected response structure from OpenAI API: {res_json}")
+        except Exception as e:
+            logger.error(f"OpenAI API request failed: {e}")
+            raise RuntimeError(f"OpenAI API request failed: {e}")
+
+    def _generate_ollama(
+        self,
+        prompt: str,
+        system_prompt: str,
+        max_new_tokens: Optional[int] = None,
+        temperature: Optional[float] = None
+    ) -> str:
+        import httpx
+        url = f"{self.config.ollama_api_url}/api/chat"
+        payload = {
+            "model": self.config.ollama_model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt}
+            ],
+            "options": {
+                "temperature": temperature if temperature is not None else self.config.temperature,
+            },
+            "stream": False
+        }
+        try:
+            response = httpx.post(url, json=payload, timeout=60.0)
+            response.raise_for_status()
+            res_json = response.json()
+            message = res_json.get("message", {})
+            if message:
+                return message.get("content", "").strip()
+            raise RuntimeError(f"Unexpected response structure from Ollama API: {res_json}")
+        except Exception as e:
+            logger.error(f"Ollama API request failed: {e}")
+            raise RuntimeError(f"Ollama API request failed: {e}")
+
 
     def _generate_mock_response(self, prompt: str, system_prompt: str) -> str:
         """Deterministic mock response generator for testing without full 14B weights."""
