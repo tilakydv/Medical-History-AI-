@@ -3,7 +3,9 @@ Configuration settings for MedBrief AI Clinical Intelligence Module
 """
 
 import os
+from typing import Optional
 from pydantic import BaseModel, Field
+
 
 class ClinicalIntelConfig(BaseModel):
     """Configuration for LLM and Clinical Intelligence Module."""
@@ -35,7 +37,40 @@ class ClinicalIntelConfig(BaseModel):
         default=os.getenv("USE_MOCK_LLM", "true").lower() == "true",
         description="If True, uses rule-based deterministic mock execution when LLM is unavailable"
     )
+    llm_provider: str = Field(
+        default=os.getenv("LLM_PROVIDER", "mock"),
+        description="LLM provider: 'mock', 'huggingface', 'gemini', 'openai', 'ollama'"
+    )
+    chatbot_only_llm: bool = Field(
+        default=os.getenv("CHATBOT_ONLY_LLM", "true").lower() == "true",
+        description="If True, LLM generates content ONLY for chatbot queries, keeping other modules deterministic"
+    )
+    gemini_api_key: Optional[str] = Field(
+        default=os.getenv("GEMINI_API_KEY"),
+        description="Google Gemini API key"
+    )
+    openai_api_key: Optional[str] = Field(
+        default=os.getenv("OPENAI_API_KEY"),
+        description="OpenAI API key"
+    )
+    openai_api_base: str = Field(
+        default=os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1"),
+        description="OpenAI API base URL"
+    )
+    openai_model: str = Field(
+        default=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+        description="OpenAI model name"
+    )
+    ollama_api_url: str = Field(
+        default=os.getenv("OLLAMA_API_URL", "http://localhost:11434"),
+        description="Ollama API base URL"
+    )
+    ollama_model: str = Field(
+        default=os.getenv("OLLAMA_MODEL", "qwen2.5:14b"),
+        description="Ollama model name"
+    )
 
 default_config = ClinicalIntelConfig()
+
 
 
