@@ -14,10 +14,13 @@ from app.models import LaboratoryReport, LaboratoryValue, MRIResult, MRIScan, Pa
 from app.schemas.common import (LabReportRead, MRIRead, PatientCreate, PatientDetail,
                                 PatientRead, PatientUpdate, ReportRead, UploadRead, UploadResponse)
 from app.services.integration_service import LLMIntegrationService
+from app.services.document_service import DocumentStructureService
 from app.services.lab_service import LaboratoryService
 from app.services.mri_service import MRIService
 from app.services.ocr_service import OCRService
+from app.services.pathology_service import PathologyService
 from app.services.radiology_service import RadiologyService
+from app.services.timeline_service import TimelineService
 from app.services.upload_service import UploadService
 
 router = APIRouter()
@@ -91,8 +94,7 @@ def extract_report(report_id: Annotated[str, Query()], db: DB) -> Report:
     report.structured_data = {"pages": result.pages}
     report.status = "extracted"
     upload.status = "processed"
-    if report.report_type.lower() in {"lab", "laboratory", "pathology"}:
-        LaboratoryService().persist(db, report.id, report.patient_id, result.text)
+    LaboratoryService().persist(db, report.id, report.patient_id, result.text)
     db.commit()
     db.refresh(report)
     return report
@@ -238,6 +240,32 @@ def report_lab_overview(report_id: str, db: DB) -> dict[str, Any]:
     return LaboratoryService().overview(report.extracted_text)
 
 
+@router.get("/reports/{report_id}/content-overview", tags=["reports"])
+def report_content_overview(report_id: str, db: DB) -> dict[str, Any]:
+    report = db.get(Report, report_id)
+    if not report:
+        raise NotFoundError("Report not found")
+    if not report.extracted_text:
+        raise NotFoundError("Extract the report before requesting its overview")
+    lab_count = len(LaboratoryService().parse(report.extracted_text))
+    content = DocumentStructureService().overview(report.extracted_text, lab_count)
+    content["timeline"] = TimelineService().build(content)
+    return content
+
+
+@router.get("/reports/{report_id}/timeline", tags=["reports"])
+def report_timeline(report_id: str, db: DB) -> dict[str, Any]:
+    report = db.get(Report, report_id)
+    if not report:
+        raise NotFoundError("Report not found")
+    if not report.extracted_text:
+        raise NotFoundError("Extract the report before requesting its timeline")
+    lab_count = len(LaboratoryService().parse(report.extracted_text))
+    content = DocumentStructureService().overview(report.extracted_text, lab_count)
+    rows = TimelineService().build(content)
+    return {"report_id": report_id, "columns": ["date", "important_points"], "rows": rows}
+
+
 @router.get("/reports/{report_id}/radiology-overview", tags=["radiology"])
 def report_radiology_overview(report_id: str, db: DB) -> dict[str, Any]:
     report = db.get(Report, report_id)
@@ -249,6 +277,16 @@ def report_radiology_overview(report_id: str, db: DB) -> dict[str, Any]:
     overview = service.overview(report.extracted_text)
     overview["download_text"] = service.as_text(overview)
     return overview
+
+
+@router.get("/reports/{report_id}/pathology-overview", tags=["pathology"])
+def report_pathology_overview(report_id: str, db: DB) -> dict[str, Any]:
+    report = db.get(Report, report_id)
+    if not report:
+        raise NotFoundError("Report not found")
+    if not report.extracted_text:
+        raise NotFoundError("Extract the report before requesting its overview")
+    return PathologyService().overview(report.extracted_text)
 
 
 @router.get("/mri/{mri_id}", response_model=MRIRead, tags=["mri"])

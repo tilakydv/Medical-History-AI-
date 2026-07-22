@@ -1,5 +1,6 @@
 import io
 import re
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -96,7 +97,15 @@ class OCRService:
 
     @staticmethod
     def clean_text(text: str) -> str:
-        text = text.replace("\x00", "").replace("\r\n", "\n")
+        # Some PDFs use non-printing C0 characters as custom-font glyphs.
+        # In those files PyMuPDF returns \x02 for a space and \x03 for a
+        # hyphen, which browsers render as square replacement symbols.
+        text = text.translate({0x02: " ", 0x03: "-"})
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        text = "".join(
+            character if character in "\n\t" or unicodedata.category(character) != "Cc" else " "
+            for character in text
+        )
         text = re.sub(r"[ \t]+", " ", text)
         text = re.sub(r"\n{3,}", "\n\n", text)
         return text.strip()
