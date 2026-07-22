@@ -58,6 +58,8 @@ class LaboratoryService:
             if not match:
                 continue
             data = match.groupdict()
+            if not self._valid_name(data["name"].strip()):
+                continue
             raw_value = data["value"].replace(" ", "")
             numeric = self._number(raw_value.lstrip("<>"))
             low, high = self._number(data["low"]), self._number(data["high"])

@@ -4,9 +4,21 @@ import os
 from datetime import date
 from typing import Any
 
-import fitz
 import httpx
 import streamlit as st
+
+try:
+    from frontend.content_utils import dated_entries, section_summary_points
+    from frontend.pdf_utils import generate_pdf_bytes
+    from frontend.structured_pdf import generate_structured_report_pdf
+    from frontend.table_utils import timeline_table_html
+except ModuleNotFoundError:
+    # Streamlit adds the script's own directory to sys.path when launched as
+    # `streamlit run frontend/streamlit_app.py`.
+    from content_utils import dated_entries, section_summary_points
+    from pdf_utils import generate_pdf_bytes
+    from structured_pdf import generate_structured_report_pdf
+    from table_utils import timeline_table_html
 
 API_URL = os.getenv("MEDBRIEF_API_URL", "http://127.0.0.1:8000").rstrip("/")
 TIMEOUT = httpx.Timeout(180.0, connect=5.0)
@@ -93,6 +105,24 @@ def format_patient_record_text(detail: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def format_lab_trends_text(patient_name: str, trends: dict[str, Any]) -> str:
+    lines = [
+        "=" * 60,
+        f"LABORATORY HISTORY AND TRENDS - {patient_name.upper()}",
+        "=" * 60,
+    ]
+    for test, entries in trends.get("series", {}).items():
+        lines.extend(["", test, "-" * len(test)])
+        for entry in entries:
+            value = entry.get("value", "Not recorded")
+            unit = entry.get("unit") or ""
+            observed = entry.get("observed_at") or "Date not recorded"
+            flag = entry.get("flag") or "Not flagged"
+            result = f"{value} {unit}".strip()
+            lines.append(f"{observed}: {result} | Flag: {flag}")
+    return "\n".join(lines)
+
+
 def format_mri_text(scan: dict[str, Any], patient_name: str) -> str:
     lines = [
         "=" * 60,
@@ -118,52 +148,6 @@ def format_mri_text(scan: dict[str, Any], patient_name: str) -> str:
         ])
     lines.append("=" * 60)
     return "\n".join(lines)
-
-
-def generate_pdf_bytes(title: str, content: str) -> bytes:
-    try:
-        doc = fitz.open()
-        page_width, page_height = 595.0, 842.0
-        margin = 40.0
-        usable_height = page_height - (2 * margin)
-        lines = content.splitlines() or ["No content available."]
-        line_height = 14
-        lines_per_page = max(1, int((usable_height - 50) // line_height))
-
-        current_line = 0
-        total_lines = len(lines)
-
-        while current_line < total_lines:
-            page = doc.new_page(width=page_width, height=page_height)
-            page.insert_text(fitz.Point(margin, margin + 12), title.upper()[:60], fontsize=12, fontname="helv")
-            page.draw_line(
-                fitz.Point(margin, margin + 20),
-                fitz.Point(page_width - margin, margin + 20),
-                color=(0.1, 0.4, 0.8),
-                width=1.5,
-            )
-
-            y = margin + 40
-            chunk = lines[current_line : current_line + lines_per_page]
-            for line in chunk:
-                page.insert_text(fitz.Point(margin, y), line[:110], fontsize=9, fontname="helv")
-                y += line_height
-
-            current_line += lines_per_page
-            footer_text = f"MedBrief AI Clinical System  |  Page {doc.page_count}"
-            page.insert_text(
-                fitz.Point(margin, page_height - margin + 10),
-                footer_text,
-                fontsize=8,
-                fontname="helv",
-                color=(0.5, 0.5, 0.5),
-            )
-
-        pdf_output = doc.tobytes()
-        doc.close()
-        return pdf_output
-    except Exception:
-        return f"{title}\n\n{content}".encode("utf-8")
 
 
 def patient_selector(people: list[dict[str, Any]], key: str) -> dict[str, Any] | None:
@@ -444,13 +428,70 @@ if page == "Reports & Labs":
                         use_container_width=True,
                     )
                     report_type = selected_report["report_type"].lower()
-                    if report_type in {"lab", "laboratory", "pathology"}:
-                        overview = request(
-                            "GET", f"/reports/{selected_report['id']}/lab-overview"
+                    content = request(
+                        "GET", f"/reports/{selected_report['id']}/content-overview"
+                    )
+                    detected = set(content.get("detected_content", [])) if content else set()
+                    if content:
+                        st.subheader("Summarized structured report content")
+                        st.caption(
+                            "Point-wise extractive summary. Use the extracted text above to review "
+                            "the complete source wording."
                         )
-                    else:
-                        overview = None
-                    if overview and report_type in {"lab", "laboratory", "pathology"}:
+                        stats = content["statistics"]
+                        s1, s2, s3 = st.columns(3)
+                        s1.metric("Extracted lines", stats["lines"])
+                        s2.metric("Structured sections", stats["structured_sections"])
+                        s3.metric("Clinical values", stats["laboratory_values"])
+                        if content["metadata"]:
+                            st.markdown("#### Document details")
+                            st.dataframe(
+                                [{"Detail": key, "Information": value}
+                                 for key, value in content["metadata"].items()],
+                                use_container_width=True,
+                                hide_index=True,
+                            )
+                        timeline = content.get("timeline", [])
+                        if timeline:
+                            st.markdown("#### Chronological timeline")
+                            st.caption(
+                                "Explicitly dated events extracted from the report and ordered "
+                                "from earliest to latest."
+                            )
+                            st.markdown(timeline_table_html(timeline), unsafe_allow_html=True)
+                        if content["sections"]:
+                            st.markdown("#### Section summaries")
+                            for heading, section_text in content["sections"].items():
+                                with st.expander(heading):
+                                    entries = dated_entries(section_text)
+                                    if entries:
+                                        for entry in entries:
+                                            st.markdown(f"- {entry}")
+                                    else:
+                                        for point in section_summary_points(section_text):
+                                            st.markdown(f"- {point}")
+                        if content["unsectioned_text"] and not content["sections"]:
+                            st.markdown("#### Report content")
+                            st.write(content["unsectioned_text"])
+                        st.download_button(
+                            "Download Summarized Details (PDF)",
+                            generate_structured_report_pdf(
+                                f"Summarized Details - {selected_report['original_filename']}",
+                                selected_report["original_filename"],
+                                content,
+                            ),
+                            file_name=(
+                                f"{selected_report['original_filename']}-summarized-details.pdf"
+                            ),
+                            mime="application/pdf",
+                            use_container_width=True,
+                            key=f"structured_details_{selected_report['id']}",
+                        )
+
+                    overview = request(
+                        "GET", f"/reports/{selected_report['id']}/lab-overview"
+                    )
+                    if overview and overview["counts"]["values_extracted"] > 0:
                         st.subheader("Laboratory overview")
                         st.markdown(overview["summary_markdown"])
                         counts = overview["counts"]
@@ -468,7 +509,45 @@ if page == "Reports & Labs":
                             mime="application/pdf",
                             use_container_width=True,
                         )
-                    elif report_type == "radiology":
+
+                    if report_type == "pathology" or "pathology" in detected:
+                        pathology = request(
+                            "GET", f"/reports/{selected_report['id']}/pathology-overview"
+                        )
+                        st.subheader("Pathology report")
+                        if pathology:
+                            if pathology["details"]:
+                                st.markdown("#### Specimen and patient details")
+                                st.dataframe(
+                                    [{"Detail": key, "Information": value}
+                                     for key, value in pathology["details"].items()],
+                                    use_container_width=True,
+                                    hide_index=True,
+                                )
+                            if pathology["sections"]:
+                                for heading, content in pathology["sections"].items():
+                                    st.markdown(f"#### {heading}")
+                                    st.write(content)
+                            else:
+                                st.info(
+                                    "No standard pathology sections were identified. "
+                                    "Review the extracted source text above."
+                                )
+                            st.caption(pathology["disclaimer"])
+                            st.download_button(
+                                "Download structured pathology report (PDF)",
+                                generate_pdf_bytes(
+                                    f"Pathology Report - {selected_report['original_filename']}",
+                                    pathology["download_text"],
+                                ),
+                                file_name=(
+                                    f"{selected_report['original_filename']}-pathology.pdf"
+                                ),
+                                mime="application/pdf",
+                                use_container_width=True,
+                            )
+
+                    if report_type == "radiology" or "radiology" in detected:
                         radiology = request(
                             "GET", f"/reports/{selected_report['id']}/radiology-overview"
                         )
@@ -513,7 +592,8 @@ if page == "Reports & Labs":
                                 mime="application/pdf",
                                 use_container_width=True,
                             )
-                    else:
+
+                    if not detected and report_type not in {"pathology", "radiology"}:
                         st.subheader(f"{report_type.title()} report")
                         st.caption(
                             "The extracted report text is displayed above and is available "
@@ -529,7 +609,10 @@ if page == "Reports & Labs":
                 ]
                 st.download_button(
                     "📄 Download Trends Report (PDF)",
-                    generate_pdf_bytes(f"Lab Trends - {patient['name']}", format_patient_record_text(detail)),
+                    generate_pdf_bytes(
+                        f"Lab Trends - {patient['name']}",
+                        format_lab_trends_text(patient["name"], trends),
+                    ),
                     file_name=f"{patient['name']}-lab-trends.pdf", mime="application/pdf",
                     use_container_width=True,
                 )

@@ -213,3 +213,30 @@ def test_rejects_mismatched_patient_document(client):
     extracted = client.post("/extract-report", params={"report_id": report_id})
     assert extracted.status_code == 422
     assert "does not match registered patient" in extracted.json()["message"]
+
+
+def test_report_timeline_backend_returns_tabular_rows(client):
+    person = patient(client)
+    document = fitz.open()
+    page = document.new_page()
+    page.insert_text(
+        (72, 72),
+        "CLINICAL HISTORY:\nOn 03/16/2006 the patient presented with syncope.\n"
+        "On 03/19/2006 the patient was discharged on medication.",
+    )
+    uploaded = client.post(
+        "/upload-report",
+        data={"patient_id": person["id"], "report_type": "clinical"},
+        files={"file": ("timeline.pdf", document.tobytes(), "application/pdf")},
+    ).json()
+    document.close()
+    report_id = uploaded["resource_id"]
+    client.post("/extract-report", params={"report_id": report_id})
+
+    response = client.get(f"/reports/{report_id}/timeline")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["columns"] == ["date", "important_points"]
+    assert [row["date"] for row in payload["rows"]] == ["2006-03-16", "2006-03-19"]
+    assert all(set(row) == {"date", "important_points"} for row in payload["rows"])
