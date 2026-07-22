@@ -6,6 +6,13 @@ import os
 from typing import Optional
 from pydantic import BaseModel, Field
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
+
 
 class ClinicalIntelConfig(BaseModel):
     """Configuration for LLM and Clinical Intelligence Module."""
