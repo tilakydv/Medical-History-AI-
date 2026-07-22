@@ -213,3 +213,105 @@ def test_rejects_mismatched_patient_document(client):
     extracted = client.post("/extract-report", params={"report_id": report_id})
     assert extracted.status_code == 422
     assert "does not match registered patient" in extracted.json()["message"]
+
+
+def test_clinical_chat_ollama_provider(client):
+    from unittest.mock import patch, MagicMock
+    from medbrief_clinical_intel.config import default_config
+    
+    person = patient(client)
+    
+    # Temporarily set config to ollama
+    original_provider = default_config.llm_provider
+    original_url = default_config.ollama_api_url
+    original_model = default_config.ollama_model
+    
+    default_config.llm_provider = "ollama"
+    default_config.ollama_api_url = "http://localhost:11434"
+    default_config.ollama_model = "test-model"
+    
+    from app.api.clinical_routes import adapter
+    adapter.cache_clear()
+    
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = {
+        "message": {
+            "content": "This is a mock Ollama response about the patient."
+        }
+    }
+    
+    with patch("httpx.post", return_value=mock_response) as mock_post:
+        response = client.post(
+            f"/clinical-intel/{person['id']}/chat/query",
+            json={"query": "Give me info", "chat_history": []},
+        )
+        assert response.status_code == 200
+        assert response.json()["answer"] == "This is a mock Ollama response about the patient."
+        
+        # Verify httpx.post was called with the correct parameters
+        mock_post.assert_called_once()
+        args, kwargs = mock_post.call_args
+        assert args[0] == "http://localhost:11434/api/chat"
+        assert kwargs["json"]["model"] == "test-model"
+        
+    # Reset config
+    default_config.llm_provider = original_provider
+    default_config.ollama_api_url = original_url
+    default_config.ollama_model = original_model
+    adapter.cache_clear()
+
+
+def test_clinical_chatbot_only_llm_routing(client):
+    from unittest.mock import patch, MagicMock
+    from medbrief_clinical_intel.config import default_config
+    from app.api.clinical_routes import adapter
+    
+    person = patient(client)
+    
+    # Temporarily set config to gemini with key
+    original_provider = default_config.llm_provider
+    original_gemini_key = default_config.gemini_api_key
+    original_chatbot_only = default_config.chatbot_only_llm
+    
+    default_config.llm_provider = "gemini"
+    default_config.gemini_api_key = "fake-key"
+    default_config.chatbot_only_llm = True
+    
+    adapter.cache_clear()
+    
+    # Test Chatbot Query: should trigger Gemini API call
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = {
+        "candidates": [
+            {
+                "content": {
+                    "parts": [{"text": "Gemini chatbot reply"}]
+                }
+            }
+        ]
+    }
+    
+    with patch("httpx.post", return_value=mock_response) as mock_post:
+        response = client.post(
+            f"/clinical-intel/{person['id']}/chat/query",
+            json={"query": "Chat query", "chat_history": []},
+        )
+        assert response.status_code == 200
+        assert response.json()["answer"] == "Gemini chatbot reply"
+        mock_post.assert_called_once()
+        
+    # Test Summarizer: should bypass Gemini and use mock/local summary because chatbot_only_llm is True
+    adapter.cache_clear()
+    with patch("httpx.post") as mock_post_sum:
+        sum_response = client.post(f"/clinical-intel/{person['id']}/summary")
+        assert sum_response.status_code == 200
+        mock_post_sum.assert_not_called()
+        
+    # Reset config
+    default_config.llm_provider = original_provider
+    default_config.gemini_api_key = original_gemini_key
+    default_config.chatbot_only_llm = original_chatbot_only
+    adapter.cache_clear()
+
