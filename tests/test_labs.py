@@ -51,3 +51,45 @@ Improved"""
         ("LDL Cholesterol", 98.0, "N"),
         ("HDL Cholesterol", 58.0, "N"),
     ]
+
+
+def test_lab_parser_handles_visual_table_rows_and_page_split_name():
+    text = """Test Description Result Reference Interval Units Status / Flag
+Total Leukocyte Count (WBC) 11.4 4.5 - 11.0 × 103 / µL HIGH
+Serum Glucose (Fasting) 92 70 - 99 mg/dL Normal
+139 136 - 145 mmol/L Normal
+CONFIDENTIAL MEDICAL RECORD Page 1 of 2
+Test Description Result Reference Interval Units Status / Flag
+Sodium (Na+)
+Potassium (K+) 4.2 3.5 - 5.1 mmol/L Normal"""
+
+    values = LaboratoryService().parse(text)
+    found = {item.test_name: item for item in values}
+
+    assert found["Total Leukocyte Count (WBC)"].flag == "H"
+    assert found["Serum Glucose (Fasting)"].value_numeric == 92
+    assert found["Sodium (Na+)"].value_numeric == 139
+    assert found["Potassium (K+)"].value_numeric == 4.2
+
+
+def test_lab_parser_recomputes_flags_from_printed_ranges():
+    values = LaboratoryService().parse(
+        "Eosinophils (%) 0.6 1 - 6 % Normal\n"
+        "Estimated GFR (eGFR) 90 > 90 mL/min/1.73m2 Normal\n"
+        "Procalcitonin 0.18 < 0.25 ng/mL Normal"
+    )
+    found = {item.test_name: item.flag for item in values}
+
+    assert found["Eosinophils (%)"] == "L"
+    assert found["Estimated GFR (eGFR)"] == "L"
+    assert found["Procalcitonin"] == "N"
+
+
+def test_lab_parser_preserves_comparator_value_and_inclusive_reference():
+    overview = LaboratoryService().overview(
+        "Estimated GFR (eGFR) > 90 >= 90 mL/min/1.73m2 Normal"
+    )
+
+    assert overview["counts"]["outside_reference_range"] == 0
+    assert overview["within_reference_range"][0]["value"] == ">90"
+    assert overview["within_reference_range"][0]["reference"] == ">90"

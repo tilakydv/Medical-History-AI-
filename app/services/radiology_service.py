@@ -21,41 +21,56 @@ class RadiologyService:
         "body areas scanned and charged": "Body areas scanned",
         "body areas scanned": "Body areas scanned",
         "service required": "Service",
+        "mrn / patient id": "MRN / Patient ID",
+        "exam type": "Exam type",
+        "accession no": "Accession number",
+        "exam date": "Exam date",
+        "ordering md": "Ordering clinician",
+        "report finalized": "Report finalized",
+        "time": "Finalized time",
     }
     FOOTER_MARKERS = (
         "is a trading name of",
         "registered office",
         "all copyrights in the name",
         "company number",
+        "confidential medical record",
+        "security stamp / signature",
     )
 
     def overview(self, text: str) -> dict[str, Any]:
         lines = self._clean_lines(text)
         metadata: dict[str, str] = {}
+        labels = "|".join(re.escape(label) for label in sorted(
+            self.FIELD_LABELS, key=len, reverse=True
+        ))
+        field_pattern = re.compile(rf"(?P<label>{labels})\s*:", re.IGNORECASE)
         for line in lines:
-            if ":" not in line:
-                continue
-            label, value = (part.strip() for part in line.split(":", 1))
-            display_label = self.FIELD_LABELS.get(label.lower())
-            if display_label and value:
-                metadata[display_label] = value
+            matches = list(field_pattern.finditer(line))
+            for index, match in enumerate(matches):
+                end = matches[index + 1].start() if index + 1 < len(matches) else len(line)
+                value = line[match.end():end].strip(" |,-")
+                display_label = self.FIELD_LABELS.get(match.group("label").lower())
+                if display_label and value:
+                    metadata[display_label] = value
+        self._recover_split_identifiers(lines, metadata)
 
         history = self._section(
             lines,
-            ("relevant clinical history",),
-            ("report", "main findings", "findings", "conclusion"),
+            ("relevant clinical history", "clinical indication & technique"),
+            ("report", "main findings", "findings", "conclusion", "detailed radiographic findings"),
         )
         findings_lines = self._section(
             lines,
-            ("main findings", "imaging findings", "findings"),
-            ("conclusion", "impression", "recommendations"),
+            ("main findings", "imaging findings", "findings", "detailed radiographic findings"),
+            ("conclusion", "impression", "recommendations", "impression & diagnostic summary"),
         )
         findings = self._bullets(findings_lines)
         conclusion_lines = self._section(
             lines,
             ("conclusion & recommendations", "conclusion and recommendations",
-             "conclusion", "impression"),
-            ("best regards", "signed", "image 1", "figure 1"),
+             "conclusion", "impression", "impression & diagnostic summary"),
+            ("best regards", "signed", "image 1", "figure 1", "confidential medical record"),
         )
         conclusion, recommendations = self._split_recommendations(conclusion_lines)
         image_references = [line for line in lines
@@ -74,6 +89,36 @@ class RadiologyService:
                 "against the original document and obtain qualified clinical review."
             ),
         }
+
+    @staticmethod
+    def _recover_split_identifiers(lines: list[str], metadata: dict[str, str]) -> None:
+        """Recover identifiers whose label and value were extracted in adjacent columns."""
+        joined_header = " ".join(lines[:25])
+        patient_identifiers = re.findall(
+            r"\b[A-Za-z0-9-]{2,20}\s*\|\s*[A-Za-z0-9-]{4,30}\b", joined_header
+        )
+        identifier = next(
+            (candidate for candidate in patient_identifiers
+             if re.search(r"\d", candidate.split("|", 1)[1])),
+            None,
+        )
+        if identifier:
+            metadata.setdefault("MRN / Patient ID", identifier)
+            if metadata.get("Patient name", "").endswith(identifier):
+                metadata["Patient name"] = metadata["Patient name"][:-len(identifier)].strip()
+
+        has_accession_label = any(
+            re.fullmatch(r"(?:accession|accession\s+no|no)\s*:??", line, re.IGNORECASE)
+            for line in lines[:25]
+        )
+        exam_type = metadata.get("Exam type", "")
+        trailing_identifier = re.search(
+            r"(?P<identifier>[A-Za-z]{1,12}(?:-[A-Za-z0-9]+)+)\s*$", exam_type
+        )
+        if has_accession_label and trailing_identifier:
+            identifier = trailing_identifier.group("identifier")
+            metadata.setdefault("Accession number", identifier)
+            metadata["Exam type"] = exam_type[:trailing_identifier.start()].strip(" |,-")
 
     def as_text(self, overview: dict[str, Any]) -> str:
         sections = [overview["title"]]
@@ -104,6 +149,8 @@ class RadiologyService:
         output: list[str] = []
         for raw in text.replace("\r", "").splitlines():
             line = re.sub(r"\s+", " ", raw).strip()
+            if re.fullmatch(r"(?:page\s*)?\d+\s+of\s+\d+", line, re.IGNORECASE):
+                continue
             if not line or any(marker in line.lower() for marker in self.FOOTER_MARKERS):
                 continue
             if output and line == output[-1]:
@@ -113,7 +160,7 @@ class RadiologyService:
 
     @staticmethod
     def _is_heading(line: str, headings: tuple[str, ...]) -> bool:
-        normalized = line.lower().strip(" :&-")
+        normalized = re.sub(r"^\d+[.)]\s*", "", line.lower()).strip(" :&-")
         return any(normalized == heading or normalized.startswith(heading)
                    for heading in headings)
 
@@ -135,7 +182,12 @@ class RadiologyService:
         current: list[str] = []
         saw_marker = False
         for line in lines:
-            if line in {"-", "•"} or line.startswith(("- ", "• ")):
+            if line.endswith(":") and len(line) < 80:
+                if current:
+                    findings.append(" ".join(current).strip())
+                current = [line]
+                saw_marker = True
+            elif line in {"-", "•"} or line.startswith(("- ", "• ")):
                 saw_marker = True
                 if current:
                     findings.append(" ".join(current).strip())
@@ -150,6 +202,8 @@ class RadiologyService:
 
     def _split_recommendations(self, lines: list[str]) -> tuple[str, list[str]]:
         text = self._paragraph(lines)
+        text = re.sub(r"\bPage\s+\d+\s+of\s+\d+\b", "", text, flags=re.IGNORECASE)
+        text = re.split(r"\bDr\.\s+[A-Z]", text, maxsplit=1)[0].strip()
         if not text:
             return "", []
         marker = re.search(
@@ -172,5 +226,6 @@ class RadiologyService:
 
     @staticmethod
     def _report_title(lines: list[str]) -> str:
-        return next((line for line in lines if "radiology report" in line.lower()
-                     or "teleneurology report" in line.lower()), "Radiology Report")
+        if any("teleneurology report" in line.lower() for line in lines):
+            return "Teleneurology report"
+        return "Radiology report"

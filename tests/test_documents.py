@@ -79,3 +79,27 @@ DO"""
 
     assert sections["I. Assessment"] == "Symptoms improved."
     assert sections["II. Plan"] == "Follow-up is documented."
+
+
+def test_clinical_structure_removes_header_fragments_and_embedded_footer_artifacts():
+    text = """CLINICAL EVALUATION REPORT
+Patient Name: Example Patient
+MRN / Patient
+Id
+003 | abc123
+Age / Sex
+42 Yrs / Male Encounter Date: October 12, 2025 Attending
+Md
+Example Clinician Department: Internal Medicine
+1. HISTORY: Patient presented with fever. (cid:127) CONFIDENTIAL MEDICAL RECORD - PATIENT ID: 003
+2. PLAN: Order imaging. 1. ◦◦◦ CONFIDENTIAL MEDICAL RECORD - PATIENT ID: 003"""
+
+    overview = DocumentStructureService().overview(text)
+
+    assert overview["metadata"]["Patient Name"] == "Example Patient"
+    assert "Id" not in overview["sections"]
+    assert "Age / Sex" not in overview["sections"]
+    assert "Md" not in overview["sections"]
+    assert "CONFIDENTIAL" not in " ".join(overview["sections"].values())
+    assert "(cid:" not in " ".join(overview["sections"].values())
+    assert overview["sections"]["1. History"] == "Patient presented with fever."
