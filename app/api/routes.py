@@ -94,7 +94,6 @@ def extract_report(report_id: Annotated[str, Query()], db: DB) -> Report:
     patient = db.get(Patient, report.patient_id)
     
     ocr_service = OCRService(get_settings().ocr_lang)
-<<<<<<< HEAD
     result = ocr_service.extract(Path(upload.stored_path))
     
     if not result.text or len(result.text.strip()) == 0:
@@ -102,12 +101,6 @@ def extract_report(report_id: Annotated[str, Query()], db: DB) -> Report:
     if not result.pages:
         raise ProcessingError("Ingestion Error: No pages were processed.")
 
-=======
-    table_or_form_report = report.report_type.lower() in {
-        "laboratory", "pathology", "radiology", "prescription", "discharge"
-    }
-    result = ocr_service.extract(Path(upload.stored_path), sort_layout=table_or_form_report)
->>>>>>> origin/main
     if patient:
         ocr_service.verify_patient_name(result.text, patient.name)
 
@@ -189,21 +182,8 @@ def extract_report(report_id: Annotated[str, Query()], db: DB) -> Report:
     }
     report.status = "extracted"
     upload.status = "processed"
-<<<<<<< HEAD
     
     LaboratoryService().persist(db, report.id, report.patient_id, result.text)
-=======
-    if report.report_type.lower() == "laboratory":
-        LaboratoryService().persist(db, report.id, report.patient_id, result.text)
-    else:
-        stale_lab = db.scalar(
-            select(LaboratoryReport).where(LaboratoryReport.report_id == report.id)
-        )
-        if stale_lab:
-            db.execute(delete(LaboratoryValue).where(
-                LaboratoryValue.lab_report_id == stale_lab.id))
-            db.delete(stale_lab)
->>>>>>> origin/main
     db.commit()
     db.refresh(report)
     return report
