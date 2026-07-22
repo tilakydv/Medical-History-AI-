@@ -51,3 +51,18 @@ def test_timeline_splits_multiple_dates_flattened_onto_one_line():
     assert timeline[-1]["important_points"] == [
         "April 30, 2009: Physician letter"
     ]
+
+
+def test_timeline_ignores_demographic_header_and_does_not_invent_report_event():
+    content = {
+        "metadata": {"Date": "October 12, 2025"},
+        "sections": {
+            "Clinical Evaluation Report": (
+                "42 Yrs / Male Encounter Date: October 12, 2025 Attending MD: "
+                "Example Clinician Department: Outpatient Internal Medicine"
+            )
+        },
+        "unsectioned_text": "",
+    }
+
+    assert TimelineService().build(content) == []

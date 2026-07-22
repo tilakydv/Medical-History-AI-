@@ -26,13 +26,13 @@ class OCRService:
         self.language = language
         self._engine: Any = None
 
-    def extract(self, path: Path) -> OCRResult:
+    def extract(self, path: Path, sort_layout: bool = False) -> OCRResult:
         suffix = path.name.lower()
         if suffix.endswith(".pdf"):
-            return self._pdf(path)
+            return self._pdf(path, sort_layout=sort_layout)
         return self._images([Image.open(path)])
 
-    def _pdf(self, path: Path) -> OCRResult:
+    def _pdf(self, path: Path, sort_layout: bool = False) -> OCRResult:
         try:
             document = fitz.open(path)
         except Exception as exc:
@@ -109,11 +109,21 @@ class OCRService:
         # In those files PyMuPDF returns \x02 for a space and \x03 for a
         # hyphen, which browsers render as square replacement symbols.
         text = text.translate({0x02: " ", 0x03: "-"})
+        # Repair common UTF-8 text decoded as a legacy single-byte encoding.
+        # These are encoding sequences, not report-specific words or values.
+        for broken, repaired in {
+            "Ã—": "x", "Âµ": "u", "Â°": " degrees ",
+            "â€“": "-", "â€”": "-", "â€¢": "-", "â€™": "'",
+            "â‰¥": ">=", "â‰¤": "<=",
+        }.items():
+            text = text.replace(broken, repaired)
         text = text.replace("\r\n", "\n").replace("\r", "\n")
         text = "".join(
-            character if character in "\n\t" or unicodedata.category(character) != "Cc" else " "
+            character if character in "\n\t" or unicodedata.category(character) not in {"Cc", "Co"}
+            else " "
             for character in text
         )
+        text = re.sub(r"\(cid:\d+\)", " ", text, flags=re.IGNORECASE)
         text = re.sub(r"[ \t]+", " ", text)
         text = re.sub(r"\n{3,}", "\n\n", text)
         return text.strip()

@@ -4,12 +4,6 @@ import re
 
 import fitz
 
-try:
-    from frontend.content_utils import dated_entries, section_summary_points
-except ModuleNotFoundError:
-    from content_utils import dated_entries, section_summary_points
-
-
 def _safe_text(text: str) -> str:
     """Normalize punctuation supported consistently by the built-in PDF font."""
     return (text.replace("\u2018", "'").replace("\u2019", "'")
@@ -53,71 +47,95 @@ def _wrap_line(text: str, width: float, font_size: float) -> list[str]:
 
 
 def generate_pdf_bytes(title: str, content: str) -> bytes:
-    """Generate a readable, wrapped, multi-page clinical PDF."""
-    document = fitz.open()
-    page_width, page_height = 595.0, 842.0
-    left_margin, right_margin = 48.0, 48.0
-    top_margin, bottom_margin = 42.0, 48.0
-    body_width = page_width - left_margin - right_margin
-    body_font_size = 9.5
-    line_height = 13.0
-    body_start = top_margin + 42.0
-    body_end = page_height - bottom_margin - 18.0
+    """Render free-form or Markdown text with the shared structured PDF design."""
+    try:
+        from frontend.structured_pdf import generate_typed_report_pdf
+    except ModuleNotFoundError:
+        from structured_pdf import generate_typed_report_pdf
 
-    logical_lines = (_safe_text(content).splitlines() or ["No content available."])
-    rendered_lines: list[str] = []
-    for logical_line in logical_lines:
-        rendered_lines.extend(_wrap_line(logical_line.rstrip(), body_width, body_font_size))
+    details, sections = _structure_download_text(content)
+    return generate_typed_report_pdf(
+        title,
+        "Generated from stored patient data",
+        details=details,
+        sections=sections,
+        disclaimer="Verify generated details against the original stored reports.",
+    )
 
-    page = None
-    y = body_start
 
-    def new_page() -> fitz.Page:
-        nonlocal y
-        created = document.new_page(width=page_width, height=page_height)
-        safe_title = _safe_text(title).upper()
-        created.insert_textbox(
-            fitz.Rect(left_margin, top_margin, page_width - right_margin, top_margin + 26),
-            safe_title,
-            fontsize=11,
-            fontname="helv",
-            color=(0.08, 0.18, 0.32),
+def _structure_download_text(content: str) -> tuple[dict[str, str], dict[str, object]]:
+    """Convert arbitrary report text into generic details and section blocks."""
+    clean = _safe_text(str(content or "")).replace("â€¢", "-").replace("•", "-")
+    lines = [re.sub(r"\s+", " ", line).strip() for line in clean.splitlines()]
+    details: dict[str, str] = {}
+    sections: dict[str, object] = {}
+    current_heading = "Report content"
+    current_lines: list[str] = []
+
+    def unique_heading(value: str) -> str:
+        heading = value.strip().strip("#*: ") or "Report content"
+        candidate = heading
+        number = 2
+        while candidate in sections:
+            candidate = f"{heading} ({number})"
+            number += 1
+        return candidate
+
+    def flush() -> None:
+        nonlocal current_lines
+        meaningful = [item for item in current_lines if item]
+        if not meaningful:
+            current_lines = []
+            return
+        bullet_items = [item[2:].strip() for item in meaningful if item.startswith("- ")]
+        non_bullets = [item for item in meaningful if not item.startswith("- ")]
+        if bullet_items and not non_bullets:
+            sections[unique_heading(current_heading)] = bullet_items
+        else:
+            sections[unique_heading(current_heading)] = "\n".join(meaningful)
+        current_lines = []
+
+    for line in lines:
+        if not line or re.fullmatch(r"[=~_-]{3,}", line):
+            continue
+        markdown_heading = re.match(r"^#{1,6}\s+(.+?)\s*$", line)
+        bold_label = re.match(r"^\*\*(.+?)\s*:\*\*\s*(.*)$", line)
+        plain_detail = re.match(r"^([A-Za-z][A-Za-z0-9 /()_-]{1,45})\s*:\s*(.+)$", line)
+        is_upper_heading = (
+            len(line) <= 90 and any(char.isalpha() for char in line)
+            and all(not char.isalpha() or char.isupper() for char in line)
         )
-        created.draw_line(
-            fitz.Point(left_margin, top_margin + 28),
-            fitz.Point(page_width - right_margin, top_margin + 28),
-            color=(0.1, 0.4, 0.8),
-            width=1.2,
-        )
-        y = body_start
-        return created
-
-    for line in rendered_lines:
-        if page is None or y + line_height > body_end:
-            page = new_page()
-        page.insert_text(
-            fitz.Point(left_margin, y),
-            line,
-            fontsize=body_font_size,
-            fontname="helv",
-            color=(0.08, 0.08, 0.08),
-        )
-        y += line_height
-
-    total_pages = document.page_count
-    for index, pdf_page in enumerate(document, start=1):
-        footer = f"MedBrief AI Clinical System | Page {index} of {total_pages}"
-        pdf_page.insert_text(
-            fitz.Point(left_margin, page_height - bottom_margin + 18),
-            footer,
-            fontsize=7.5,
-            fontname="helv",
-            color=(0.45, 0.45, 0.45),
-        )
-
-    output = document.tobytes(garbage=4, deflate=True)
-    document.close()
-    return output
+        if markdown_heading or is_upper_heading:
+            flush()
+            current_heading = (markdown_heading.group(1) if markdown_heading else line).strip()
+            continue
+        if bold_label:
+            if current_heading != "Report content":
+                value = bold_label.group(2).strip()
+                current_lines.append(
+                    f"- {bold_label.group(1).strip()}: {value}".rstrip(": ")
+                )
+                continue
+            flush()
+            current_heading = bold_label.group(1).strip()
+            if bold_label.group(2).strip():
+                current_lines.append(bold_label.group(2).strip())
+            continue
+        if plain_detail and not current_lines and current_heading == "Report content":
+            label, value = plain_detail.groups()
+            details[label.strip()] = value.strip()
+            continue
+        if re.match(r"^(?:[-*+]\s+|\d+[.)]\s+)", line):
+            point = re.sub(r"^(?:[-*+]\s+|\d+[.)]\s+)", "", line).strip()
+            current_lines.append(f"- {point}")
+        elif line.startswith(">"):
+            current_lines.append(line.lstrip("> "))
+        else:
+            current_lines.append(line.replace("**", ""))
+    flush()
+    if not sections:
+        sections["Report content"] = "No content available."
+    return details, sections
 
 
 def _html_text(value: object) -> str:
@@ -127,14 +145,20 @@ def _html_text(value: object) -> str:
 def generate_structured_report_pdf(title: str, filename: str,
                                    content: dict[str, object]) -> bytes:
     """Generate a polished structured report with real tables and bullet lists."""
+    try:
+        from frontend.structured_pdf import generate_structured_report_pdf as renderer
+    except ModuleNotFoundError:
+        from structured_pdf import generate_structured_report_pdf as renderer
+    return renderer(title, filename, content)
+
+    # Legacy renderer retained below temporarily for backward-compatible source history.
     statistics = content.get("statistics", {}) if isinstance(content, dict) else {}
     metadata = content.get("metadata", {}) if isinstance(content, dict) else {}
     timeline = content.get("timeline", []) if isinstance(content, dict) else []
-    sections = content.get("sections", {}) if isinstance(content, dict) else {}
 
     parts = [
         '<div class="cover">',
-        '<h1>Summarized Clinical Report</h1>',
+        '<h1>Structured Clinical Report</h1>',
         f'<p class="subtitle">{_html_text(filename)}</p>',
         '</div>',
         '<h2>Report overview</h2>',
@@ -179,24 +203,8 @@ def generate_structured_report_pdf(title: str, filename: str,
                 parts.append(f'<td class="point">&#8226;&nbsp; {_html_text(point)}</td></tr>')
             parts.append('</tbody></table>')
 
-    if sections:
-        parts.append('<h2 class="section-start">Section summaries</h2>')
-        for heading, section_text in sections.items():
-            parts.append(f'<div class="section"><h3>{_html_text(heading)}</h3><ul>')
-            points = dated_entries(section_text) or section_summary_points(section_text)
-            for point in points:
-                parts.append(f'<li>{_html_text(point)}</li>')
-            parts.append('</ul></div>')
-    elif content.get("unsectioned_text"):
-        parts.extend([
-            '<h2>Report summary</h2>', '<ul>',
-            *[f'<li>{_html_text(point)}</li>' for point in
-              section_summary_points(str(content["unsectioned_text"]))],
-            '</ul>',
-        ])
-
     parts.append(
-        '<div class="disclaimer"><b>Clinical review notice:</b> This extractive summary '
+        '<div class="disclaimer"><b>Clinical review notice:</b> These structured details '
         'must be verified against the original uploaded report.</div>'
     )
     css = """

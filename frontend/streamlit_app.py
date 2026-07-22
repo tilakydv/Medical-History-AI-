@@ -8,16 +8,24 @@ import httpx
 import streamlit as st
 
 try:
-    from frontend.content_utils import dated_entries, section_summary_points
+    from frontend.content_utils import section_summary_points
     from frontend.pdf_utils import generate_pdf_bytes
-    from frontend.structured_pdf import generate_structured_report_pdf
+    from frontend.structured_pdf import (generate_full_patient_record_pdf,
+                                         generate_grounded_summary_pdf,
+                                         generate_laboratory_report_pdf,
+                                         generate_structured_report_pdf,
+                                         generate_typed_report_pdf)
     from frontend.table_utils import timeline_table_html
 except ModuleNotFoundError:
     # Streamlit adds the script's own directory to sys.path when launched as
     # `streamlit run frontend/streamlit_app.py`.
-    from content_utils import dated_entries, section_summary_points
+    from content_utils import section_summary_points
     from pdf_utils import generate_pdf_bytes
-    from structured_pdf import generate_structured_report_pdf
+    from structured_pdf import (generate_full_patient_record_pdf,
+                                generate_grounded_summary_pdf,
+                                generate_laboratory_report_pdf,
+                                generate_structured_report_pdf,
+                                generate_typed_report_pdf)
     from table_utils import timeline_table_html
 
 API_URL = os.getenv("MEDBRIEF_API_URL", "http://127.0.0.1:8000").rstrip("/")
@@ -148,6 +156,19 @@ def format_mri_text(scan: dict[str, Any], patient_name: str) -> str:
         ])
     lines.append("=" * 60)
     return "\n".join(lines)
+
+
+def enrich_patient_detail(detail: dict[str, Any], patient_id: str) -> dict[str, Any]:
+    """Attach source filenames omitted by the base patient-detail response."""
+    listing = request("GET", f"/patients/{patient_id}/reports") or []
+    filenames = {item["id"]: item.get("original_filename") for item in listing}
+    enriched = dict(detail)
+    enriched["reports"] = [
+        {**report, "original_filename": filenames.get(report.get("id"))
+         or f"{str(report.get('report_type') or 'report').title()} report"}
+        for report in detail.get("reports", [])
+    ]
+    return enriched
 
 
 def patient_selector(people: list[dict[str, Any]], key: str) -> dict[str, Any] | None:
@@ -284,6 +305,7 @@ if page == "Patients":
         if selected:
             detail = request("GET", f"/patient/{selected['id']}")
             if detail:
+                detail = enrich_patient_detail(detail, selected["id"])
                 col1, col2, col3 = st.columns(3)
                 col1.metric("Stored reports", len(detail.get("reports", [])))
                 col2.metric("Stored MRI scans", len(detail.get("mri_scans", [])))
@@ -291,7 +313,7 @@ if page == "Patients":
                 
                 st.download_button(
                     "📄 Download Patient Record (PDF)",
-                    generate_pdf_bytes(f"Patient Record - {selected['name']}", format_patient_record_text(detail)),
+                    generate_full_patient_record_pdf(detail),
                     file_name=f"{selected['name']}-patient-record.pdf",
                     mime="application/pdf",
                     use_container_width=True,
@@ -432,11 +454,11 @@ if page == "Reports & Labs":
                         "GET", f"/reports/{selected_report['id']}/content-overview"
                     )
                     detected = set(content.get("detected_content", [])) if content else set()
-                    if content:
-                        st.subheader("Summarized structured report content")
+                    if content and report_type != "laboratory":
+                        st.subheader("Structured report content")
                         st.caption(
-                            "Point-wise extractive summary. Use the extracted text above to review "
-                            "the complete source wording."
+                            "Key document details and dated events. Use the extracted text above "
+                            "to review the complete source wording."
                         )
                         stats = content["statistics"]
                         s1, s2, s3 = st.columns(3)
@@ -460,38 +482,37 @@ if page == "Reports & Labs":
                             )
                             st.markdown(timeline_table_html(timeline), unsafe_allow_html=True)
                         if content["sections"]:
-                            st.markdown("#### Section summaries")
+                            st.markdown("#### Clinical report details")
+                            st.caption(
+                                "Complete extracted wording organized under the report's own "
+                                "section headings."
+                            )
                             for heading, section_text in content["sections"].items():
                                 with st.expander(heading):
-                                    entries = dated_entries(section_text)
-                                    if entries:
-                                        for entry in entries:
-                                            st.markdown(f"- {entry}")
-                                    else:
-                                        for point in section_summary_points(section_text):
-                                            st.markdown(f"- {point}")
+                                    st.write(section_text)
                         if content["unsectioned_text"] and not content["sections"]:
                             st.markdown("#### Report content")
                             st.write(content["unsectioned_text"])
                         st.download_button(
-                            "Download Summarized Details (PDF)",
+                            "Download Structured Details (PDF)",
                             generate_structured_report_pdf(
-                                f"Summarized Details - {selected_report['original_filename']}",
+                                f"Structured Details - {selected_report['original_filename']}",
                                 selected_report["original_filename"],
                                 content,
                             ),
                             file_name=(
-                                f"{selected_report['original_filename']}-summarized-details.pdf"
+                                f"{selected_report['original_filename']}-structured-details.pdf"
                             ),
                             mime="application/pdf",
                             use_container_width=True,
-                            key=f"structured_details_{selected_report['id']}",
+                            key=f"structured_details_complete_v2_{selected_report['id']}",
                         )
 
                     overview = request(
                         "GET", f"/reports/{selected_report['id']}/lab-overview"
                     )
-                    if overview and overview["counts"]["values_extracted"] > 0:
+                    if (report_type == "laboratory" and overview
+                            and overview["counts"]["values_extracted"] > 0):
                         st.subheader("Laboratory overview")
                         st.markdown(overview["summary_markdown"])
                         counts = overview["counts"]
@@ -504,7 +525,8 @@ if page == "Reports & Labs":
                             st.dataframe(rows, use_container_width=True, hide_index=True)
                         st.download_button(
                             "📄 Download Lab Overview (PDF)",
-                            generate_pdf_bytes(f"Lab Overview - {selected_report['original_filename']}", overview.get("summary_markdown", "")),
+                            generate_laboratory_report_pdf(
+                                selected_report["original_filename"], overview),
                             file_name=f"{selected_report['original_filename']}-labs-overview.pdf",
                             mime="application/pdf",
                             use_container_width=True,
@@ -536,15 +558,119 @@ if page == "Reports & Labs":
                             st.caption(pathology["disclaimer"])
                             st.download_button(
                                 "Download structured pathology report (PDF)",
-                                generate_pdf_bytes(
-                                    f"Pathology Report - {selected_report['original_filename']}",
-                                    pathology["download_text"],
+                                generate_typed_report_pdf(
+                                    "Pathology Report",
+                                    selected_report["original_filename"],
+                                    details=pathology["details"],
+                                    sections=pathology["sections"],
+                                    disclaimer=pathology["disclaimer"],
                                 ),
                                 file_name=(
                                     f"{selected_report['original_filename']}-pathology.pdf"
                                 ),
                                 mime="application/pdf",
                                 use_container_width=True,
+                            )
+
+                    if report_type == "prescription":
+                        prescription = request(
+                            "GET", f"/reports/{selected_report['id']}/prescription-overview"
+                        )
+                        st.subheader("Prescription orders")
+                        if prescription:
+                            if prescription["details"]:
+                                st.dataframe(
+                                    [{"Detail": key, "Information": value}
+                                     for key, value in prescription["details"].items()],
+                                    use_container_width=True, hide_index=True,
+                                )
+                            for number, medication in enumerate(
+                                    prescription["medications"], start=1):
+                                st.markdown(f"#### {number}. {medication.get('name', 'Medication')}")
+                                st.dataframe(
+                                    [{"Field": key.replace("_", " ").title(), "Information": value}
+                                     for key, value in medication.items() if key != "name"],
+                                    use_container_width=True, hide_index=True,
+                                )
+                            if prescription["precautions"]:
+                                st.markdown("#### Special instructions and precautions")
+                                for point in prescription["precautions"]:
+                                    st.markdown(f"- {point}")
+                            st.caption(prescription["disclaimer"])
+                            st.download_button(
+                                "Download structured prescription (PDF)",
+                                generate_typed_report_pdf(
+                                    "Medical Prescription",
+                                    selected_report["original_filename"],
+                                    details=prescription["details"],
+                                    sections={"Special instructions and precautions":
+                                              prescription["precautions"]},
+                                    tables=[{
+                                        "title": "Medication orders",
+                                        "columns": [
+                                            {"key": "name", "label": "Medication"},
+                                            {"key": "directions", "label": "Directions"},
+                                            {"key": "quantity", "label": "Quantity"},
+                                            {"key": "refills", "label": "Refills"},
+                                        ],
+                                        "rows": prescription["medications"],
+                                        "widths": [0.24, 0.52, 0.14, 0.10],
+                                    }],
+                                    disclaimer=prescription["disclaimer"],
+                                ),
+                                file_name=f"{selected_report['original_filename']}-prescription.pdf",
+                                mime="application/pdf", use_container_width=True,
+                            )
+
+                    if report_type == "discharge":
+                        discharge = request(
+                            "GET", f"/reports/{selected_report['id']}/discharge-overview"
+                        )
+                        st.subheader("Discharge summary")
+                        if discharge:
+                            if discharge["details"]:
+                                st.dataframe(
+                                    [{"Detail": key, "Information": value}
+                                     for key, value in discharge["details"].items()],
+                                    use_container_width=True, hide_index=True,
+                                )
+                            for heading, section_text in discharge["sections"].items():
+                                if heading == "Discharge Medications & Outpatient Regimen":
+                                    continue
+                                st.markdown(f"#### {heading}")
+                                for point in section_summary_points(section_text, maximum=8):
+                                    st.markdown(f"- {point}")
+                            if discharge.get("medications"):
+                                st.markdown("#### Discharge medications and outpatient regimen")
+                                st.dataframe(discharge["medications"], use_container_width=True,
+                                             hide_index=True)
+                            st.caption(discharge["disclaimer"])
+                            st.download_button(
+                                "Download structured discharge summary (PDF)",
+                                generate_typed_report_pdf(
+                                    "Discharge Summary",
+                                    selected_report["original_filename"],
+                                    details=discharge["details"],
+                                    sections={
+                                        heading: section_text
+                                        for heading, section_text in discharge["sections"].items()
+                                        if heading != "Discharge Medications & Outpatient Regimen"
+                                    },
+                                    tables=[{
+                                        "title": "Discharge medications and outpatient regimen",
+                                        "columns": [
+                                            {"key": "name", "label": "Medication"},
+                                            {"key": "dose", "label": "Dose"},
+                                            {"key": "route / frequency", "label": "Route / frequency"},
+                                            {"key": "instructions", "label": "Instructions"},
+                                        ],
+                                        "rows": discharge.get("medications", []),
+                                        "widths": [0.20, 0.16, 0.24, 0.40],
+                                    }],
+                                    disclaimer=discharge["disclaimer"],
+                                ),
+                                file_name=f"{selected_report['original_filename']}-discharge.pdf",
+                                mime="application/pdf", use_container_width=True,
                             )
 
                     if report_type == "radiology" or "radiology" in detected:
@@ -587,13 +713,27 @@ if page == "Reports & Labs":
                             st.caption(radiology["disclaimer"])
                             st.download_button(
                                 "📄 Download Radiology Report (PDF)",
-                                generate_pdf_bytes(f"Radiology Report - {selected_report['original_filename']}", radiology.get("download_text", "")),
+                                generate_typed_report_pdf(
+                                    "Radiology Report",
+                                    selected_report["original_filename"],
+                                    details=radiology["metadata"],
+                                    sections={
+                                        "Relevant clinical history": radiology["clinical_history"],
+                                        "Main imaging findings": radiology["findings"],
+                                        "Conclusion": radiology["conclusion"],
+                                        "Documented recommendations": radiology["recommendations"],
+                                        "Image references": radiology["image_references"],
+                                    },
+                                    disclaimer=radiology["disclaimer"],
+                                ),
                                 file_name=f"{selected_report['original_filename']}-radiology.pdf",
                                 mime="application/pdf",
                                 use_container_width=True,
                             )
 
-                    if not detected and report_type not in {"pathology", "radiology"}:
+                    if not detected and report_type not in {
+                        "pathology", "radiology", "prescription", "discharge"
+                    }:
                         st.subheader(f"{report_type.title()} report")
                         st.caption(
                             "The extracted report text is displayed above and is available "
@@ -623,6 +763,7 @@ if page == "Brain MRI":
     patient = patient_selector(people, "mri_patient")
     if patient:
         detail = request("GET", f"/patient/{patient['id']}") or {}
+        detail = enrich_patient_detail(detail, patient["id"])
         scans = detail.get("mri_scans", [])
         mri_file = st.file_uploader(
             "Upload MRI file", key="mri_upload", on_change=clear_mri_selection,
@@ -702,6 +843,7 @@ if page == "Grounded Summary":
     patient = patient_selector(people, "summary_patient")
     if patient:
         detail = request("GET", f"/patient/{patient['id']}") or {}
+        detail = enrich_patient_detail(detail, patient["id"])
         extracted_count = sum(1 for report in detail.get("reports", [])
                               if report.get("status") == "extracted")
         st.info(f"{extracted_count} extracted report(s) are available for this summary.")
@@ -712,11 +854,13 @@ if page == "Grounded Summary":
         summary = st.session_state.get(f"summary_{patient['id']}")
         if summary:
             st.markdown(summary["narrative_summary_markdown"])
-            with st.expander("Structured summary data"):
-                st.json(summary)
+            timeline = summary.get("chronological_timeline") or []
+            if timeline:
+                st.markdown("### Chronological timeline")
+                st.markdown(timeline_table_html(timeline), unsafe_allow_html=True)
             st.download_button(
                 "📄 Download Grounded Summary (PDF)",
-                generate_pdf_bytes(f"Grounded Summary - {patient['name']}", summary["narrative_summary_markdown"]),
+                generate_grounded_summary_pdf(patient["name"], summary),
                 file_name=f"{patient['name']}-grounded-summary.pdf", mime="application/pdf",
                 use_container_width=True,
             )
@@ -736,7 +880,7 @@ if page == "Grounded Summary":
                 )
                 st.download_button(
                     "📄 Download Full Patient Record (PDF)",
-                    generate_pdf_bytes(f"Full Patient Record - {patient['name']}", format_patient_record_text(detail)),
+                    generate_full_patient_record_pdf(detail),
                     file_name=f"{patient['name']}-full-record.pdf", mime="application/pdf",
                 )
 

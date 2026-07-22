@@ -6,7 +6,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import LaboratoryReport, LaboratoryValue
+from app.models import LaboratoryReport, LaboratoryValue, Report
 
 
 @dataclass
@@ -28,12 +28,27 @@ class LaboratoryService:
         r"(?:\s+(?P<unit>[A-Za-zµμ%/\^0-9.-]+))?"
         r"(?:\s+(?P<low>-?\d+(?:[.,]\d+)?)\s*[-–]\s*(?P<high>-?\d+(?:[.,]\d+)?))?"
         r"(?:\s+(?P<flag>H|L|HIGH|LOW|ABNORMAL))?\s*$", re.IGNORECASE)
-    RANGE = re.compile(r"^\s*(?:(?P<op>[<>])\s*(?P<limit>\d+(?:[.,]\d+)?)|"
+    TABLE_ROW = re.compile(
+        r"^\s*(?P<name>[A-Za-z][^\n]{1,110}?)\s+"
+        r"(?P<value>[<>]?\s*-?\d+(?:[.,]\d+)?)\s+"
+        r"(?P<reference>(?:[<>]=?|>=|<=)\s*\d+(?:[.,]\d+)?|"
+        r"-?\d+(?:[.,]\d+)?\s*-\s*-?\d+(?:[.,]\d+)?)\s+"
+        r"(?P<unit>.+?)\s+(?P<status>HIGH|LOW|ABNORMAL|NORMAL(?:\s*/\s*LOW RISK)?)\s*$",
+        re.IGNORECASE,
+    )
+    ORPHAN_ROW = re.compile(
+        r"^\s*(?P<value>[<>]?\s*-?\d+(?:[.,]\d+)?)\s+"
+        r"(?P<reference>(?:[<>]=?|>=|<=)\s*\d+(?:[.,]\d+)?|"
+        r"-?\d+(?:[.,]\d+)?\s*-\s*-?\d+(?:[.,]\d+)?)\s+"
+        r"(?P<unit>.+?)\s+(?P<status>HIGH|LOW|ABNORMAL|NORMAL(?:\s*/\s*LOW RISK)?)\s*$",
+        re.IGNORECASE,
+    )
+    RANGE = re.compile(r"^\s*(?:(?P<op>>=|<=|>|<)\s*(?P<limit>\d+(?:[.,]\d+)?)|"
                        r"(?P<low>-?\d+(?:[.,]\d+)?)\s*[-–]\s*"
                        r"(?P<high>-?\d+(?:[.,]\d+)?))\s*$")
     VALUE = re.compile(r"^[<>]?\s*-?\d+(?:[.,]\d+)?$")
     FLEX_RANGE = re.compile(
-        r"^\s*(?:(?P<op>[<>])\s*(?P<limit>\d+(?:[.,]\d+)?)|"
+        r"^\s*(?:(?P<op>>=|<=|>|<)\s*(?P<limit>\d+(?:[.,]\d+)?)|"
         r"(?P<low>-?\d+(?:[.,]\d+)?)\s*-\s*(?P<high>-?\d+(?:[.,]\d+)?))"
         r"(?:\s*(?P<unit>[A-Za-z%/^0-9.-]+))?\s*$"
     )
@@ -42,7 +57,7 @@ class LaboratoryService:
         r"(?:\s*(?P<unit>[A-Za-z%/^0-9.-]+))?\s*$"
     )
     SKIP_NAME = re.compile(
-        r"method|serum|plasma|blood|urine|calculated|colorim|assay|cytometry|"
+        r"method|plasma|urine|calculated|colorim|assay|cytometry|"
         r"electrode|enzym|visual|manual|test name|result|panel|examination|profile|"
         r"biochemistry|haematology|pathology|barcode|sample|date|page",
         re.IGNORECASE,
@@ -52,8 +67,10 @@ class LaboratoryService:
 
     def parse(self, text: str) -> list[ParsedLab]:
         text = self._normalize_pdf_text(text)
-        values: list[ParsedLab] = []
+        values: list[ParsedLab] = [*self._parse_table_rows(text), *self._parse_page_split_rows(text)]
         for raw in text.splitlines():
+            if self.TABLE_ROW.match(re.sub(r"\s+", " ", raw).strip()):
+                continue
             match = self.LINE.match(raw)
             if not match:
                 continue
@@ -65,7 +82,8 @@ class LaboratoryService:
             low, high = self._number(data["low"]), self._number(data["high"])
             flag = data["flag"].upper() if data["flag"] else self._flag(numeric, low, high)
             values.append(ParsedLab(data["name"].strip(), numeric,
-                                    None if numeric is not None else raw_value,
+                                    raw_value if raw_value.startswith((">", "<"))
+                                    or numeric is None else None,
                                     data["unit"], low, high, flag))
         seen = {(item.test_name.lower(), item.value_numeric, item.unit) for item in values}
         for item in self._parse_vertical(text):
@@ -74,6 +92,54 @@ class LaboratoryService:
                 values.append(item)
                 seen.add(key)
         return values
+
+    def _parse_page_split_rows(self, text: str) -> list[ParsedLab]:
+        """Recover a table row whose name wrapped onto the following PDF page."""
+        lines = [re.sub(r"\s+", " ", line).strip() for line in text.splitlines() if line.strip()]
+        output: list[ParsedLab] = []
+        for index, line in enumerate(lines):
+            match = self.ORPHAN_ROW.match(line)
+            if not match:
+                continue
+            name = next((candidate for candidate in lines[index + 1:index + 9]
+                         if self._valid_name(candidate)
+                         and not re.search(r"confidential|test description|status / flag|page \d+", candidate, re.I)
+                         and not self.TABLE_ROW.match(candidate)), None)
+            if not name:
+                continue
+            value = self._number(match.group("value").replace(" ", "").lstrip("<>"))
+            raw_value = match.group("value").replace(" ", "")
+            reference = self.FLEX_RANGE.match(match.group("reference"))
+            low, high = self._reference_bounds(reference) if reference else (None, None)
+            status = match.group("status").upper()
+            flag = self._flag_from_reference(value, reference, status)
+            output.append(ParsedLab(
+                name, value, raw_value if raw_value.startswith((">", "<")) else None,
+                match.group("unit").strip(), low, high, flag,
+            ))
+        return output
+
+    def _parse_table_rows(self, text: str) -> list[ParsedLab]:
+        output: list[ParsedLab] = []
+        for raw in text.splitlines():
+            line = re.sub(r"\s+", " ", raw).strip()
+            match = self.TABLE_ROW.match(line)
+            if not match or not self._valid_name(match.group("name")):
+                continue
+            raw_value = match.group("value").replace(" ", "")
+            value = self._number(raw_value.lstrip("<>"))
+            reference_text = match.group("reference")
+            reference = self.FLEX_RANGE.match(reference_text)
+            low, high = self._reference_bounds(reference) if reference else (None, None)
+            status = match.group("status").upper()
+            flag = self._flag_from_reference(value, reference, status)
+            output.append(ParsedLab(
+                match.group("name").strip(), value,
+                raw_value if raw_value.startswith((">", "<")) else None,
+                match.group("unit").strip(),
+                low, high, flag,
+            ))
+        return output
 
     def _parse_vertical(self, text: str) -> list[ParsedLab]:
         lines = [line.strip() for line in text.splitlines() if line.strip()]
@@ -94,7 +160,7 @@ class LaboratoryService:
                     low, high = self._reference_bounds(reference)
                     unit = current.group("unit") or reference.groupdict().get("unit")
                     output.append(ParsedLab(name[:150], value, None, unit, low, high,
-                                            self._flag(value, low, high)))
+                                            self._flag_from_reference(value, reference)))
                     continue
             value_index = index - 2
             if not self.VALUE.match(lines[value_index]):
@@ -114,7 +180,7 @@ class LaboratoryService:
                 continue
             low, high = self._reference_bounds(reference)
             output.append(ParsedLab(name, value, None, unit, low, high,
-                                    self._flag(value, low, high)))
+                                    self._flag_from_reference(value, reference)))
         return output
 
     def _valid_name(self, candidate: str) -> bool:
@@ -137,11 +203,33 @@ class LaboratoryService:
     def _reference_bounds(self, match: re.Match[str]) -> tuple[float | None, float | None]:
         low, high = self._number(match.group("low")), self._number(match.group("high"))
         limit = self._number(match.group("limit"))
-        if match.group("op") == "<":
+        if match.group("op") in {"<", "<="}:
             high = limit
-        elif match.group("op") == ">":
+        elif match.group("op") in {">", ">="}:
             low = limit
         return low, high
+
+    def _flag_from_reference(self, value: float | None, reference: re.Match[str],
+                             printed_status: str | None = None) -> str | None:
+        """Compare the value with the printed interval, including strict < and > limits."""
+        if value is None:
+            return None
+        operator = reference.group("op")
+        limit = self._number(reference.group("limit"))
+        if operator == ">" and limit is not None:
+            return "L" if value <= limit else "N"
+        if operator == ">=" and limit is not None:
+            return "L" if value < limit else "N"
+        if operator == "<" and limit is not None:
+            return "H" if value >= limit else "N"
+        if operator == "<=" and limit is not None:
+            return "H" if value > limit else "N"
+        low, high = self._reference_bounds(reference)
+        computed = self._flag(value, low, high)
+        if computed is not None:
+            return computed
+        status = (printed_status or "").upper()
+        return "H" if status in {"HIGH", "ABNORMAL"} else "L" if status == "LOW" else "N"
 
     def overview(self, text: str) -> dict[str, Any]:
         values = self.parse(text)
@@ -188,7 +276,8 @@ class LaboratoryService:
             reference = f">{item.reference_low:g}"
         elif item.reference_high is not None:
             reference = f"<{item.reference_high:g}"
-        return {"test": item.test_name, "value": item.value_numeric,
+        return {"test": item.test_name,
+                "value": item.value_text if item.value_text is not None else item.value_numeric,
                 "unit": item.unit, "reference": reference, "flag": item.flag}
 
     def persist(self, db: Session, report_id: str, patient_id: str, text: str,
@@ -217,11 +306,18 @@ class LaboratoryService:
     def _normalize_pdf_text(text: str) -> str:
         """Normalize common dash characters emitted by PDF text extraction."""
         return (text.replace("\ufffd", "-").replace("\u2013", "-")
-                .replace("\u2014", "-"))
+                .replace("\u2014", "-").replace("\u2265", ">=")
+                .replace("\u2264", "<="))
 
     def trends(self, db: Session, patient_id: str) -> dict[str, list[dict[str, Any]]]:
-        rows = db.scalars(select(LaboratoryValue).where(LaboratoryValue.patient_id == patient_id)
-                          .order_by(LaboratoryValue.test_name, LaboratoryValue.observed_at)).all()
+        rows = db.scalars(
+            select(LaboratoryValue)
+            .join(LaboratoryReport, LaboratoryReport.id == LaboratoryValue.lab_report_id)
+            .join(Report, Report.id == LaboratoryReport.report_id)
+            .where(LaboratoryValue.patient_id == patient_id,
+                   Report.report_type == "laboratory")
+            .order_by(LaboratoryValue.test_name, LaboratoryValue.observed_at)
+        ).all()
         output: dict[str, list[dict[str, Any]]] = {}
         for row in rows:
             output.setdefault(row.test_name, []).append({

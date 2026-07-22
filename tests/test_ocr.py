@@ -12,3 +12,11 @@ def test_clean_text_normalizes_custom_pdf_spacing_and_hyphens():
 
 def test_clean_text_removes_other_nonprinting_control_characters():
     assert OCRService.clean_text("Clinical\x00\x07 report") == "Clinical report"
+
+
+def test_clean_text_removes_private_glyphs_and_repairs_encoding_artifacts():
+    cleaned = OCRService.clean_text(
+        "WBC 11.4 Ã— 103 / ÂµL\nValue\uf000 (cid:127) next"
+    )
+
+    assert cleaned == "WBC 11.4 x 103 / uL\nValue next"

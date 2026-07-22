@@ -10,10 +10,17 @@ class DocumentStructureService:
     METADATA_LABELS = {
         "case", "case no", "case number", "date", "document date", "report date",
         "patient", "patient name", "date of birth", "dob", "age", "sex", "gender",
-        "mrn", "medical record number", "physician", "attending physician",
+        "age / sex", "mrn", "mrn / patient", "patient id", "mrn / patient id", "id",
+        "medical record number", "physician", "attending physician", "attending md",
+        "md", "encounter date",
         "consultant", "medical consultant", "hospital", "facility", "department",
     }
     NON_SECTION_LABELS = METADATA_LABELS | {"print name", "signature", "page"}
+    METADATA_DISPLAY = {
+        "id": "Patient ID", "patient id": "Patient ID",
+        "mrn / patient": "MRN / Patient ID", "mrn / patient id": "MRN / Patient ID",
+        "md": "Attending clinician", "attending md": "Attending clinician",
+    }
     ENUMERATED_HEADING = re.compile(
         r"^(?P<marker>(?:\d{1,3}|[IVXLCDM]{1,7}|[A-Z]))[.)]\s+"
         r"(?P<title>[^:]{2,100}):\s*(?P<content>.*)$"
@@ -49,9 +56,10 @@ class DocumentStructureService:
     def _metadata(self, lines: list[str]) -> dict[str, str]:
         metadata: dict[str, str] = {}
         for index, line in enumerate(lines):
-            if ":" not in line:
-                continue
-            label, value = (part.strip() for part in line.split(":", 1))
+            if ":" in line:
+                label, value = (part.strip() for part in line.split(":", 1))
+            else:
+                label, value = line.strip(), ""
             normalized_label = re.sub(r"\s+", " ", label.lower().rstrip("."))
             if normalized_label not in self.METADATA_LABELS:
                 continue
@@ -62,8 +70,15 @@ class DocumentStructureService:
                 if not (self.ENUMERATED_HEADING.match(candidate)
                         or self.STANDALONE_ENUMERATOR.fullmatch(candidate)):
                     value = candidate
+            # PDF layout extraction may join the following label onto the value.
+            # Stop at another recognized metadata label instead of merging fields.
+            labels = "|".join(re.escape(item) for item in sorted(
+                self.METADATA_LABELS, key=len, reverse=True
+            ))
+            value = re.split(rf"\b(?:{labels})\s*:", value,
+                             maxsplit=1, flags=re.IGNORECASE)[0].strip()
             if value and len(value) <= 200:
-                metadata[label.title()] = value
+                metadata[self.METADATA_DISPLAY.get(normalized_label, label.title())] = value
         return metadata
 
     def _sections(self, lines: list[str]) -> tuple[dict[str, str], list[str]]:
@@ -86,7 +101,8 @@ class DocumentStructureService:
                 parsed_heading = None
             if parsed_heading:
                 if heading and content:
-                    sections[heading] = " ".join(content).strip()
+                    if not self._metadata_only(content):
+                        sections[heading] = self._clean_section_text(" ".join(content))
                 elif content:
                     unsectioned.extend(content)
                 heading, initial_content = parsed_heading
@@ -96,10 +112,31 @@ class DocumentStructureService:
             else:
                 unsectioned.append(line)
         if heading and content:
-            sections[heading] = " ".join(content).strip()
+            if not self._metadata_only(content):
+                sections[heading] = self._clean_section_text(" ".join(content))
         elif content:
             unsectioned.extend(content)
         return sections, unsectioned
+
+    @staticmethod
+    def _clean_section_text(text: str) -> str:
+        """Remove page furniture that PDF extraction joins to clinical sentences."""
+        text = re.sub(
+            r"(?:\s+\d+[.)])?\s+Page\s+\d+\s+of\s+\d+\b",
+            " ",
+            text,
+            flags=re.IGNORECASE,
+        )
+        text = re.sub(
+            r"\b(?:Dr\.?\s+)?[A-Z][A-Za-z.'-]+(?:\s+[A-Z][A-Za-z.'-]+){1,3},?\s+"
+            r"(?:M\.?D\.?|D\.?O\.?|M\.?B\.?B\.?S\.?)\b.*?\b"
+            r"(?:medical\s+registration|registration|licen[cs]e)\s+"
+            r"(?:no|number)\s*[:#].*$",
+            "",
+            text,
+            flags=re.IGNORECASE,
+        )
+        return re.sub(r"\s+", " ", text).strip()
 
     @staticmethod
     def _is_page_artifact(line: str) -> bool:
@@ -160,16 +197,60 @@ class DocumentStructureService:
     def _is_heading(cls, line: str) -> bool:
         return cls._heading(line) is not None
 
+    @classmethod
+    def _metadata_only(cls, lines: list[str]) -> bool:
+        """Identify a report-header block composed of labels and short identifiers."""
+        if not lines:
+            return False
+        joined = " ".join(lines)
+        labels_found = sum(
+            bool(re.search(rf"\b{re.escape(label)}\b", joined, re.IGNORECASE))
+            for label in cls.METADATA_LABELS if len(label) > 2
+        )
+        clinical_cues = re.search(
+            r"\b(?:symptom|diagnos|finding|history|examination|treatment|medication|"
+            r"assessment|plan|procedure|result)\w*\b", joined, re.IGNORECASE,
+        )
+        return labels_found >= 2 and clinical_cues is None
+
     @staticmethod
     def _lines(text: str) -> list[str]:
-        raw_lines = [re.sub(r"\s+", " ", line).strip()
-                     for line in text.replace("\r", "").splitlines() if line.strip()]
+        raw_lines: list[str] = []
+        for source_line in text.replace("\r", "").splitlines():
+            line = re.sub(r"\(cid:\d+\)", " ", source_line, flags=re.IGNORECASE)
+            line = re.sub(
+                r"(?:\s+\d+[.)]\s*[\u2022\u25a0\u25a1\u25aa\u25ab\u25e6]+)+\s*$",
+                "", line,
+            )
+            line = re.sub(r"[\u2022\u25a0\u25a1\u25aa\u25ab\u25e6]", "", line)
+            line = re.sub(
+                r"\bCONFIDENTIAL\s+(?:MEDICAL\s+)?RECORD\b.*$", "", line,
+                flags=re.IGNORECASE,
+            )
+            line = re.sub(r"(?:\s*\d+[.)])?\s*(?:[nN]\s*){2,}$", "", line)
+            line = re.sub(r"[\uE000-\uF8FF]", "", line)
+            line = re.sub(r"\s+", " ", line).strip(" \t•■")
+            if line:
+                raw_lines.append(line)
+        combined_lines: list[str] = []
+        raw_index = 0
+        while raw_index < len(raw_lines):
+            line = raw_lines[raw_index]
+            if raw_index + 1 < len(raw_lines):
+                combined = re.sub(r"\s+", " ", f"{line} {raw_lines[raw_index + 1]}").lower()
+                if combined in DocumentStructureService.METADATA_LABELS:
+                    line = f"{line} {raw_lines[raw_index + 1]}"
+                    raw_index += 1
+            combined_lines.append(line)
+            raw_index += 1
+
         lines: list[str] = []
         index = 0
-        while index < len(raw_lines):
-            line = raw_lines[index]
-            if DocumentStructureService.STANDALONE_ENUMERATOR.fullmatch(line) and index + 1 < len(raw_lines):
-                line = f"{line} {raw_lines[index + 1]}"
+        while index < len(combined_lines):
+            line = combined_lines[index]
+            if (DocumentStructureService.STANDALONE_ENUMERATOR.fullmatch(line)
+                    and index + 1 < len(combined_lines)):
+                line = f"{line} {combined_lines[index + 1]}"
                 index += 1
             lines.append(line)
             index += 1

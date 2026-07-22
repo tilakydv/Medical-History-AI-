@@ -19,7 +19,9 @@ from app.services.lab_service import LaboratoryService
 from app.services.mri_service import MRIService
 from app.services.ocr_service import OCRService
 from app.services.pathology_service import PathologyService
+from app.services.prescription_service import PrescriptionService
 from app.services.radiology_service import RadiologyService
+from app.services.discharge_service import DischargeService
 from app.services.timeline_service import TimelineService
 from app.services.upload_service import UploadService
 
@@ -92,6 +94,7 @@ def extract_report(report_id: Annotated[str, Query()], db: DB) -> Report:
     patient = db.get(Patient, report.patient_id)
     
     ocr_service = OCRService(get_settings().ocr_lang)
+<<<<<<< HEAD
     result = ocr_service.extract(Path(upload.stored_path))
     
     if not result.text or len(result.text.strip()) == 0:
@@ -99,6 +102,12 @@ def extract_report(report_id: Annotated[str, Query()], db: DB) -> Report:
     if not result.pages:
         raise ProcessingError("Ingestion Error: No pages were processed.")
 
+=======
+    table_or_form_report = report.report_type.lower() in {
+        "laboratory", "pathology", "radiology", "prescription", "discharge"
+    }
+    result = ocr_service.extract(Path(upload.stored_path), sort_layout=table_or_form_report)
+>>>>>>> origin/main
     if patient:
         ocr_service.verify_patient_name(result.text, patient.name)
 
@@ -180,8 +189,21 @@ def extract_report(report_id: Annotated[str, Query()], db: DB) -> Report:
     }
     report.status = "extracted"
     upload.status = "processed"
+<<<<<<< HEAD
     
     LaboratoryService().persist(db, report.id, report.patient_id, result.text)
+=======
+    if report.report_type.lower() == "laboratory":
+        LaboratoryService().persist(db, report.id, report.patient_id, result.text)
+    else:
+        stale_lab = db.scalar(
+            select(LaboratoryReport).where(LaboratoryReport.report_id == report.id)
+        )
+        if stale_lab:
+            db.execute(delete(LaboratoryValue).where(
+                LaboratoryValue.lab_report_id == stale_lab.id))
+            db.delete(stale_lab)
+>>>>>>> origin/main
     db.commit()
     db.refresh(report)
     return report
@@ -374,6 +396,26 @@ def report_pathology_overview(report_id: str, db: DB) -> dict[str, Any]:
     if not report.extracted_text:
         raise NotFoundError("Extract the report before requesting its overview")
     return PathologyService().overview(report.extracted_text)
+
+
+@router.get("/reports/{report_id}/prescription-overview", tags=["prescription"])
+def report_prescription_overview(report_id: str, db: DB) -> dict[str, Any]:
+    report = db.get(Report, report_id)
+    if not report:
+        raise NotFoundError("Report not found")
+    if not report.extracted_text:
+        raise NotFoundError("Extract the report before requesting its overview")
+    return PrescriptionService().overview(report.extracted_text)
+
+
+@router.get("/reports/{report_id}/discharge-overview", tags=["discharge"])
+def report_discharge_overview(report_id: str, db: DB) -> dict[str, Any]:
+    report = db.get(Report, report_id)
+    if not report:
+        raise NotFoundError("Report not found")
+    if not report.extracted_text:
+        raise NotFoundError("Extract the report before requesting its overview")
+    return DischargeService().overview(report.extracted_text)
 
 
 @router.get("/mri/{mri_id}", response_model=MRIRead, tags=["mri"])
