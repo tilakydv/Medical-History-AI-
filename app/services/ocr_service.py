@@ -42,21 +42,29 @@ class OCRService:
         try:
             for number, page in enumerate(document, start=1):
                 embedded = self.clean_text(page.get_text("text"))
-                # Very short content is typically a header/watermark on a scanned page.
-                if len(embedded) >= 40:
+                has_key_terms = any(w in embedded.lower() for w in ["patient", "name", "complaint", "history", "diagnosis", "impression", "reference", "result", "date", "report", "examination", "rx"])
+                if len(embedded) >= 150 and has_key_terms:
                     text = embedded
                     method = "pymupdf"
                 else:
                     pix = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
                     image = Image.open(io.BytesIO(pix.tobytes("png")))
-                    text = self._ocr_image(image)
-                    method = "paddleocr"
+                    ocr_text = self._ocr_image(image)
+                    merged_lines = []
+                    seen_lines = set()
+                    for line in (embedded + "\n" + ocr_text).splitlines():
+                        l_clean = line.strip()
+                        if l_clean and l_clean.lower() not in seen_lines:
+                            merged_lines.append(l_clean)
+                            seen_lines.add(l_clean.lower())
+                    text = "\n".join(merged_lines)
+                    method = "mixed" if len(embedded) > 10 else "paddleocr"
                     used_ocr = True
                 pages.append({"page": number, "text": text, "method": method})
         finally:
             document.close()
         return OCRResult("\n\n".join(p["text"] for p in pages if p["text"]),
-                         "hybrid" if used_ocr else "pymupdf", pages)
+                          "hybrid" if used_ocr else "pymupdf", pages)
 
     def _images(self, images: list[Image.Image]) -> OCRResult:
         pages = [{"page": i, "text": self._ocr_image(image), "method": "paddleocr"}
@@ -123,17 +131,23 @@ class OCRService:
         if not reg_tokens:
             return
 
-        for line in extracted_text.splitlines()[:30]:
-            match = self.PATIENT_NAME_HEADER.search(line)
-            if match:
-                doc_name_raw = match.group(1).strip()
-                doc_name_clean = re.split(
-                    r"\b(?:age|sex|gender|dob|date|mrn|id|ref|doctor|dr)\b", doc_name_raw, flags=re.IGNORECASE
-                )[0].strip()
-                doc_tokens = {w.lower() for w in re.findall(r"[A-Za-z]{2,}", doc_name_clean)}
-                doc_tokens -= {"male", "female", "other", "years", "yrs", "year", "old", "name"}
-                if doc_tokens and not (reg_tokens & doc_tokens):
-                    raise ProcessingError(
-                        f"Document patient name ('{doc_name_clean}') does not match registered patient ('{patient_name}')"
-                    )
+        lines = [l.strip() for l in extracted_text.splitlines() if l.strip()]
+        doc_name_clean = ""
+        for idx, line in enumerate(lines[:30]):
+            line_lower = line.lower()
+            if any(h in line_lower for h in ["patient name", "name of patient", "patient's name", "pt name", "patient:"]):
+                parts = re.split(r"[:\-]", line, 1)
+                candidate = parts[1].strip() if len(parts) > 1 else ""
+                if not candidate and idx + 1 < len(lines):
+                    candidate = lines[idx + 1].strip()
+                doc_name_clean = re.split(r"\b(?:age|sex|gender|dob|date|mrn|id|ref|doctor|dr)\b", candidate, flags=re.IGNORECASE)[0].strip()
+                break
+
+        if doc_name_clean:
+            doc_tokens = {w.lower() for w in re.findall(r"[A-Za-z]{2,}", doc_name_clean)}
+            doc_tokens -= {"male", "female", "other", "years", "yrs", "year", "old", "name", "patient"}
+            if doc_tokens and not (reg_tokens & doc_tokens):
+                raise ProcessingError(
+                    f"Document patient name ('{doc_name_clean}') does not match registered patient ('{patient_name}')"
+                )
 

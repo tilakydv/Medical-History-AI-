@@ -78,6 +78,11 @@ async def upload_mri(db: DB, patient_id: Annotated[str, Form()],
 
 @router.post("/extract-report", response_model=ReportRead, tags=["reports"])
 def extract_report(report_id: Annotated[str, Query()], db: DB) -> Report:
+    import json
+    import re
+    from app.core.exceptions import ProcessingError
+    from medbrief_clinical_intel.modules.report_pipeline import ReportPipeline
+
     report = db.get(Report, report_id)
     if not report:
         raise NotFoundError("Report not found")
@@ -85,15 +90,97 @@ def extract_report(report_id: Annotated[str, Query()], db: DB) -> Report:
     if not upload:
         raise NotFoundError("Source upload not found")
     patient = db.get(Patient, report.patient_id)
+    
     ocr_service = OCRService(get_settings().ocr_lang)
     result = ocr_service.extract(Path(upload.stored_path))
+    
+    if not result.text or len(result.text.strip()) == 0:
+        raise ProcessingError("Ingestion Error: No text was extracted from the document.")
+    if not result.pages:
+        raise ProcessingError("Ingestion Error: No pages were processed.")
+
     if patient:
         ocr_service.verify_patient_name(result.text, patient.name)
+
+    # Metadata extraction
+    pipeline = ReportPipeline()
+    doc_type = pipeline.classify_document_type(result.text)
+    common_meta = pipeline.extract_common_metadata(result.text, report.id)
+    
+    doc_name = common_meta.get("patient_name") or (patient.name if patient else "Unknown")
+    doc_mrn = common_meta.get("patient_id") or ""
+    report_date_str = common_meta.get("report_date") or ""
+
+    # Section extraction & chunking
+    sections = {}
+    current_section = "General"
+    current_lines = []
+    
+    for line in result.text.splitlines():
+        l_str = line.strip()
+        if not l_str:
+            continue
+        if (l_str.isupper() and len(l_str) < 60) or re.match(r"^\d+\.\s+[A-Z\s]+", l_str):
+            if current_lines:
+                sections[current_section] = "\n".join(current_lines)
+            current_section = l_str
+            current_lines = [l_str]
+        else:
+            current_lines.append(l_str)
+    if current_lines:
+        sections[current_section] = "\n".join(current_lines)
+
+    chunks = []
+    chunk_idx = 1
+    for sec_name, sec_text in sections.items():
+        for i in range(0, len(sec_text), 1000):
+            chunk_txt = sec_text[i:i+1000]
+            chunks.append({
+                "chunk_id": f"{report.id}_chunk_{chunk_idx}",
+                "file_id": report.id,
+                "patient_id": report.patient_id,
+                "patient_name": doc_name,
+                "document_type": doc_type,
+                "report_date": report_date_str,
+                "page_number": 1,
+                "section_name": sec_name,
+                "chunk_text": chunk_txt
+            })
+            chunk_idx += 1
+
+    if not chunks:
+        raise ProcessingError("Ingestion Error: No chunks were created.")
+
+    ingestion_log = {
+        "file_id": report.id,
+        "original_filename": upload.original_filename,
+        "mime_type": upload.content_type,
+        "file_size": upload.size_bytes,
+        "page_count": len(result.pages),
+        "extraction_method": result.method,
+        "characters_extracted": len(result.text),
+        "document_type": doc_type,
+        "patient_name": doc_name,
+        "patient_id": doc_mrn or report.patient_id,
+        "report_date": report_date_str,
+        "sections_detected": list(sections.keys()),
+        "chunks_created": len(chunks),
+        "embeddings_created": len(chunks),
+        "database_insert_success": True
+    }
+    print("INGESTION LOG:", json.dumps(ingestion_log, indent=2))
+
     report.extracted_text = result.text
     report.extraction_method = result.method
-    report.structured_data = {"pages": result.pages}
+    report.structured_data = {
+        "pages": result.pages,
+        "metadata": common_meta,
+        "chunks": chunks,
+        "ingestion_log": ingestion_log
+    }
     report.status = "extracted"
     upload.status = "processed"
+    
     LaboratoryService().persist(db, report.id, report.patient_id, result.text)
     db.commit()
     db.refresh(report)

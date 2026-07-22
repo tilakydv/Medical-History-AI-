@@ -33,5 +33,7 @@ class ChatResponse(BaseModel):
     is_grounded: bool = Field(default=True, description="True if response is fully supported by uploaded files")
     not_found_in_records: bool = Field(default=False, description="True if query cannot be answered from uploaded records")
     citations: List[Citation] = Field(default_factory=list, description="Supporting document references")
+    developer_evidence: Optional[Dict[str, Any]] = Field(default=None, description="Optional debugging and trace evidence")
+
 
 
