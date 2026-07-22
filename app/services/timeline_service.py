@@ -25,6 +25,11 @@ class TimelineService:
     OUTCOME_CUES = re.compile(
         r"\b(?:death|died|expired|outcome|demise)\w*\b", re.IGNORECASE
     )
+    DOCUMENT_EVENT_CUES = re.compile(
+        r"\b(?:record|note|letter|image|radiograph|report\s+(?:reviewed|finalized)|"
+        r"consultation|appointment|visit)\w*\b",
+        re.IGNORECASE,
+    )
 
     def build(self, content: dict[str, Any]) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
@@ -40,6 +45,12 @@ class TimelineService:
                 "", segment, flags=re.IGNORECASE,
             )
             for point in self._event_points(segment):
+                # Dates appearing only in demographic/administrative headers are not
+                # clinical timeline events. Keep dated care and document events, but
+                # do not manufacture a row from an encounter-date label alone.
+                if not (self.CLINICAL_CUES.search(point) or
+                        self.DOCUMENT_EVENT_CUES.search(point)):
+                    continue
                 identity = (self._date_key(date_text).isoformat(), point)
                 if identity in seen:
                     continue
@@ -99,10 +110,6 @@ class TimelineService:
                     active_sentences.append(sentence)
             if active_date and active_sentences:
                 add_event(active_date, " ".join(active_sentences), heading)
-
-        document_date = content.get("metadata", {}).get("Date")
-        if document_date and self.DATE_PATTERN.fullmatch(document_date.strip()):
-            add_event(document_date, "Report dated on this date.", "Document details")
 
         rows.sort(key=lambda row: (row["_sort"], row["_order"]))
         grouped: dict[str, list[str]] = {}
